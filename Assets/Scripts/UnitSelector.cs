@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.EventSystems;
 #if ENABLE_INPUT_SYSTEM
 using UnityEngine.InputSystem;
 #endif
@@ -6,6 +7,7 @@ using UnityEngine.InputSystem;
 /// <summary>
 /// Click a unit to select it, click it again to deselect it.
 /// With a unit selected, click a tile to send the unit there.
+/// Clicks on UI (for example the End Turn button) are ignored.
 /// </summary>
 public class UnitSelector : MonoBehaviour
 {
@@ -14,9 +16,15 @@ public class UnitSelector : MonoBehaviour
 
     private Unit selectedUnit;
 
+    /// <summary>The unit that is currently selected (null if none).</summary>
+    public Unit SelectedUnit => selectedUnit;
+
     private void Update()
     {
         if (!TryGetClick(out Vector2 screenPos))
+            return;
+
+        if (EventSystem.current != null && EventSystem.current.IsPointerOverGameObject())
             return;
 
         if (targetCamera == null)

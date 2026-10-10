@@ -2,21 +2,27 @@ using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>
-/// A* path search over the tile field. Walls stand between tiles and cannot be crossed.
-/// Units may move in 8 directions; the rules for what counts as a legal step live in GridManager.CanStep.
+/// Route planning over the tile field.
+///
+/// For COST purposes a unit cannot move diagonally: it walks from tile to side-adjacent tile
+/// and every tile entered costs 1 action point, so the cost of a route is its number of
+/// orthogonal steps (a 'Manhattan' distance that respects walls).
+///
+/// For ANIMATION the unit may still cut a corner diagonally (see SmoothPath), but that
+/// shortcut is charged as the two orthogonal steps it replaces, so the cost never changes.
 /// </summary>
 public static class Pathfinder
 {
-    private const float DiagonalCost = 1.41421356f;
-
     private static readonly Vector2Int[] Directions =
     {
-        new Vector2Int(1, 0), new Vector2Int(-1, 0), new Vector2Int(0, 1), new Vector2Int(0, -1),
-        new Vector2Int(1, 1), new Vector2Int(1, -1), new Vector2Int(-1, 1), new Vector2Int(-1, -1)
+        Vector2Int.right, Vector2Int.left, Vector2Int.up, Vector2Int.down
     };
 
     /// <summary>
-    /// Returns the tiles from start to goal (both included), or null if the goal cannot be reached.
+    /// Returns a shortest route from start to goal (both included) in orthogonal steps, or null if the
+    /// goal cannot be reached. The cost in action points is path.Count - 1.
+    /// Among equally short routes the one that hugs the straight line from start to goal is chosen,
+    /// which gives a staircase for diagonal trips (and lets SmoothPath turn it into a diagonal run).
     /// </summary>
     public static List<Tile> FindPath(GridManager grid, Tile start, Tile goal)
     {
@@ -29,90 +35,158 @@ public static class Pathfinder
         if (!InBounds(s, size) || !InBounds(e, size))
             return null;
 
-        float[,] g = new float[size.x, size.y];
-        float[,] f = new float[size.x, size.y];
-        bool[,] closed = new bool[size.x, size.y];
-        Vector2Int[,] parent = new Vector2Int[size.x, size.y];
+        // Distance (in steps) from every tile to the goal.
+        int[,] dist = BuildDistanceField(grid, e, size);
+        if (dist[s.x, s.y] < 0)
+            return null;
 
-        for (int x = 0; x < size.x; x++)
+        List<Tile> path = new List<Tile> { start };
+        Vector2 line = new Vector2(e.x - s.x, e.y - s.y);
+        Vector2Int current = s;
+        Vector2Int previousDirection = Vector2Int.zero;
+
+        while (current != e)
         {
-            for (int y = 0; y < size.y; y++)
-            {
-                g[x, y] = float.PositiveInfinity;
-                f[x, y] = float.PositiveInfinity;
-            }
-        }
-
-        List<Vector2Int> open = new List<Vector2Int>();
-        g[s.x, s.y] = 0f;
-        f[s.x, s.y] = Heuristic(s, e);
-        open.Add(s);
-
-        while (open.Count > 0)
-        {
-            int bestIndex = 0;
-            for (int i = 1; i < open.Count; i++)
-            {
-                if (f[open[i].x, open[i].y] < f[open[bestIndex].x, open[bestIndex].y])
-                    bestIndex = i;
-            }
-
-            Vector2Int current = open[bestIndex];
-            open.RemoveAt(bestIndex);
-
-            if (current == e)
-                return Reconstruct(grid, parent, s, e);
-
-            closed[current.x, current.y] = true;
+            int here = dist[current.x, current.y];
+            bool found = false;
+            Vector2Int bestNext = current;
+            Vector2Int bestDirection = Vector2Int.zero;
+            float bestDeviation = float.PositiveInfinity;
 
             foreach (Vector2Int d in Directions)
             {
                 Vector2Int n = current + d;
-                if (!grid.CanStep(current, n) || closed[n.x, n.y])
+                if (!grid.CanStep(current, n) || dist[n.x, n.y] != here - 1)
+                    continue; // not a step along a shortest route
+
+                float deviation = Mathf.Abs((n.x - s.x) * line.y - (n.y - s.y) * line.x);
+
+                bool better;
+                if (!found)
+                    better = true;
+                else if (deviation < bestDeviation - 0.0001f)
+                    better = true;
+                else if (deviation > bestDeviation + 0.0001f)
+                    better = false;
+                else
+                    better = d != previousDirection && bestDirection == previousDirection; // tie: prefer turning
+
+                if (better)
+                {
+                    found = true;
+                    bestNext = n;
+                    bestDirection = d;
+                    bestDeviation = deviation;
+                }
+            }
+
+            if (!found)
+                return null; // cannot happen on a consistent grid
+
+            path.Add(grid.GetTile(bestNext));
+            previousDirection = bestDirection;
+            current = bestNext;
+        }
+
+        return path;
+    }
+
+    /// <summary>
+    /// Turns an orthogonal route into the route the unit actually runs along: wherever the route turns a
+    /// corner and a diagonal step is possible (no wall touches that corner), the corner is cut.
+    /// The result is a subset of the given tiles (first and last are kept). The cost of a hop between two
+    /// consecutive tiles of the result is |dx| + |dy|, so the total cost equals the original number of steps.
+    /// </summary>
+    public static List<Tile> SmoothPath(GridManager grid, List<Tile> path)
+    {
+        if (path == null || path.Count == 0)
+            return new List<Tile>();
+
+        List<Tile> result = new List<Tile> { path[0] };
+        int i = 0;
+
+        while (i < path.Count - 1)
+        {
+            if (i + 2 < path.Count)
+            {
+                Vector2Int first = path[i + 1].Coords - path[i].Coords;
+                Vector2Int second = path[i + 2].Coords - path[i + 1].Coords;
+
+                if (first != second && grid.CanStep(path[i].Coords, path[i + 2].Coords))
+                {
+                    result.Add(path[i + 2]);
+                    i += 2;
                     continue;
+                }
+            }
 
-                bool diagonal = d.x != 0 && d.y != 0;
-                float tentative = g[current.x, current.y] + (diagonal ? DiagonalCost : 1f);
-                if (tentative >= g[n.x, n.y])
-                    continue;
+            result.Add(path[i + 1]);
+            i++;
+        }
 
-                parent[n.x, n.y] = current;
-                g[n.x, n.y] = tentative;
-                f[n.x, n.y] = tentative + Heuristic(n, e);
+        return result;
+    }
 
-                if (!open.Contains(n))
-                    open.Add(n);
+    /// <summary>
+    /// Returns every tile that can be reached from start in at most maxSteps orthogonal steps
+    /// (the start tile itself is not included). These are exactly the tiles a unit with maxSteps
+    /// action points can walk to.
+    /// </summary>
+    public static List<Tile> GetReachableTiles(GridManager grid, Tile start, int maxSteps)
+    {
+        List<Tile> result = new List<Tile>();
+        if (grid == null || start == null || maxSteps <= 0)
+            return result;
+
+        Vector2Int size = grid.Size;
+        Vector2Int s = start.Coords;
+        if (!InBounds(s, size))
+            return result;
+
+        int[,] dist = BuildDistanceField(grid, s, size);
+        for (int x = 0; x < size.x; x++)
+        {
+            for (int y = 0; y < size.y; y++)
+            {
+                if (dist[x, y] >= 1 && dist[x, y] <= maxSteps)
+                    result.Add(grid.GetTile(new Vector2Int(x, y)));
             }
         }
 
-        return null;
+        return result;
     }
 
-    private static List<Tile> Reconstruct(GridManager grid, Vector2Int[,] parent, Vector2Int start, Vector2Int end)
+    // Breadth-first search over side-adjacent steps. -1 means 'not reachable'.
+    private static int[,] BuildDistanceField(GridManager grid, Vector2Int source, Vector2Int size)
     {
-        List<Tile> path = new List<Tile>();
-        Vector2Int c = end;
-        while (c != start)
+        int[,] dist = new int[size.x, size.y];
+        for (int x = 0; x < size.x; x++)
+            for (int y = 0; y < size.y; y++)
+                dist[x, y] = -1;
+
+        Queue<Vector2Int> queue = new Queue<Vector2Int>();
+        dist[source.x, source.y] = 0;
+        queue.Enqueue(source);
+
+        while (queue.Count > 0)
         {
-            path.Add(grid.GetTile(c));
-            c = parent[c.x, c.y];
+            Vector2Int c = queue.Dequeue();
+            foreach (Vector2Int d in Directions)
+            {
+                Vector2Int n = c + d;
+                if (!grid.CanStep(c, n) || dist[n.x, n.y] >= 0)
+                    continue;
+
+                dist[n.x, n.y] = dist[c.x, c.y] + 1;
+                queue.Enqueue(n);
+            }
         }
 
-        path.Add(grid.GetTile(start));
-        path.Reverse();
-        return path;
+        return dist;
     }
 
     private static bool InBounds(Vector2Int c, Vector2Int size)
     {
         return c.x >= 0 && c.y >= 0 && c.x < size.x && c.y < size.y;
-    }
-
-    // Octile distance: exact cost on an empty 8-connected grid.
-    private static float Heuristic(Vector2Int a, Vector2Int b)
-    {
-        int dx = Mathf.Abs(a.x - b.x);
-        int dy = Mathf.Abs(a.y - b.y);
-        return (dx + dy) + (DiagonalCost - 2f) * Mathf.Min(dx, dy);
     }
 }

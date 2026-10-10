@@ -1,11 +1,12 @@
 using UnityEngine;
+using UnityEngine.EventSystems;
 #if ENABLE_INPUT_SYSTEM
 using UnityEngine.InputSystem;
 #endif
 
 /// <summary>
 /// Highlights the tile under the mouse cursor and removes the highlight
-/// as soon as the cursor leaves the tile.
+/// as soon as the cursor leaves the tile. Nothing is highlighted while the cursor is over UI.
 /// </summary>
 public class TileHover : MonoBehaviour
 {
@@ -34,6 +35,9 @@ public class TileHover : MonoBehaviour
         if (!TryGetPointerPosition(out Vector2 screenPos))
             return null;
 
+        if (EventSystem.current != null && EventSystem.current.IsPointerOverGameObject())
+            return null;
+
         // Ignore the cursor while it is outside of the camera's view.
         if (!targetCamera.pixelRect.Contains(screenPos))
             return null;
@@ -42,7 +46,7 @@ public class TileHover : MonoBehaviour
         if (!Physics.Raycast(ray, out RaycastHit hit, Mathf.Infinity, raycastMask))
             return null;
 
-        // If the first thing under the cursor is a unit (not a tile), nothing is highlighted.
+        // If the first thing under the cursor is a unit or a wall (not a tile), nothing is highlighted.
         return hit.collider.GetComponentInParent<Tile>();
     }
 
