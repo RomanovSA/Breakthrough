@@ -1,18 +1,29 @@
+using System.Collections.Generic;
 using UnityEngine;
 #if UNITY_EDITOR
 using UnityEditor;
 #endif
 
 /// <summary>
-/// Spawns a Unit on a random tile of the field. It spawns every time the field is (re)built,
-/// so a new field always gets a unit. Right-click the component header and choose "Spawn"
-/// to respawn it by hand in the editor.
-/// The spawned unit is parented to this object; any previous unit is removed first.
+/// Spawns units on random, different tiles of the field every time the field is (re)built.
+/// What is spawned is described by a list of groups: a unit prefab and how many of it.
+/// The prefab decides the faction (for example one group of player units and one of enemies).
+/// Right-click the component header and choose "Spawn" to respawn everything by hand in the editor.
+/// The spawned units are parented to this object; any previous ones are removed first.
 /// </summary>
 public class UnitSpawner : MonoBehaviour
 {
+    [System.Serializable]
+    private class SpawnGroup
+    {
+        [Tooltip("The unit to spawn. Its Faction field decides which side the units belong to.")]
+        public Unit prefab;
+
+        [Min(0)] public int count = 1;
+    }
+
     [SerializeField] private GridManager grid;
-    [SerializeField] private Unit unitPrefab;
+    [SerializeField] private List<SpawnGroup> groups = new List<SpawnGroup>();
 
     private bool spawned;
 
@@ -43,32 +54,71 @@ public class UnitSpawner : MonoBehaviour
     }
 
     [ContextMenu("Spawn")]
-    public Unit Spawn()
+    public List<Unit> Spawn()
     {
+        List<Unit> result = new List<Unit>();
+
         if (grid == null)
             grid = FindFirstObjectByType<GridManager>();
 
-        if (grid == null || unitPrefab == null)
+        if (grid == null)
         {
-            Debug.LogWarning("UnitSpawner: GridManager or Unit Prefab is not assigned.", this);
-            return null;
+            Debug.LogWarning("UnitSpawner: GridManager is not assigned.", this);
+            return result;
         }
 
         Tile[] tiles = grid.GetComponentsInChildren<Tile>();
         if (tiles.Length == 0)
         {
             Debug.LogWarning("UnitSpawner: the field has no tiles. Build the field first.", this);
-            return null;
+            return result;
         }
 
         Clear();
 
-        Tile tile = tiles[Random.Range(0, tiles.Length)];
-        Unit unit = SpawnUnit();
-        unit.name = "Unit";
-        unit.PlaceOn(tile);
+        // Shuffle the tiles (Fisher-Yates) and hand them out one by one, so no two units share a tile.
+        for (int i = tiles.Length - 1; i > 0; i--)
+        {
+            int j = Random.Range(0, i + 1);
+            Tile tmp = tiles[i];
+            tiles[i] = tiles[j];
+            tiles[j] = tmp;
+        }
+
+        int nextTile = 0;
+        foreach (SpawnGroup group in groups)
+        {
+            if (group == null || group.prefab == null)
+            {
+                Debug.LogWarning("UnitSpawner: a spawn group has no prefab.", this);
+                continue;
+            }
+
+            for (int i = 0; i < group.count; i++)
+            {
+                if (nextTile >= tiles.Length)
+                {
+                    Debug.LogWarning("UnitSpawner: there are more units than tiles, the rest was not spawned.", this);
+                    spawned = true;
+                    return result;
+                }
+
+                Unit unit = SpawnUnit(group.prefab);
+                unit.name = unit.Faction + "Unit_" + (i + 1);
+                if (!unit.PlaceOn(tiles[nextTile++]))
+                {
+                    // cannot happen with the shuffled list, but never leave two units on one tile
+                    Debug.LogWarning("UnitSpawner: the tile was already taken, the unit was not spawned.", this);
+                    DestroyImmediate(unit.gameObject);
+                    continue;
+                }
+
+                result.Add(unit);
+            }
+        }
+
         spawned = true;
-        return unit;
+        return result;
     }
 
     [ContextMenu("Clear")]
@@ -78,18 +128,23 @@ public class UnitSpawner : MonoBehaviour
         {
             GameObject child = transform.GetChild(i).gameObject;
             if (Application.isPlaying)
+            {
+                child.SetActive(false); // frees its tile right away; Destroy only happens at the end of the frame
                 Destroy(child);
+            }
             else
+            {
                 DestroyImmediate(child);
+            }
         }
     }
 
-    private Unit SpawnUnit()
+    private Unit SpawnUnit(Unit prefab)
     {
 #if UNITY_EDITOR
         if (!Application.isPlaying)
-            return (Unit)PrefabUtility.InstantiatePrefab(unitPrefab, transform);
+            return (Unit)PrefabUtility.InstantiatePrefab(prefab, transform);
 #endif
-        return Instantiate(unitPrefab, transform);
+        return Instantiate(prefab, transform);
     }
 }

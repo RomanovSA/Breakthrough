@@ -15,9 +15,15 @@ public class Unit : MonoBehaviour
     private static readonly int ColorId = Shader.PropertyToID("_Color");         // Built-in
 
     [SerializeField] private Vector2Int coords;
+
+    [Header("Faction")]
+    [SerializeField] private Faction faction = Faction.Player;
+
     [SerializeField] private Color selectedColor = new Color(1f, 0.9f, 0.1f, 1f);
     [Tooltip("Parts that change colour when the unit is selected. Empty = the whole unit.")]
     [SerializeField] private Renderer[] selectionRenderers;
+    [Tooltip("Which materials of those renderers change colour (e.g. only the shirt). Empty = all of them.")]
+    [SerializeField] private int[] selectionMaterialIndices;
     [SerializeField, Min(0.1f)] private float moveSpeed = 4f; // world units per second
 
     [Header("Action points")]
@@ -29,6 +35,54 @@ public class Unit : MonoBehaviour
     [SerializeField, Min(0)] private int health = 100;
 
     private Renderer[] tintTargets;
+
+    private static readonly List<Unit> allUnits = new List<Unit>();
+
+    /// <summary>Every unit that is currently active in the scene.</summary>
+    public static IReadOnlyList<Unit> All => allUnits;
+
+    /// <summary>Goes up every time some unit appears, disappears, takes a tile or leaves one.</summary>
+    public static int OccupancyVersion { get; private set; }
+
+    /// <summary>Coordinates of every tile that is taken by a unit other than 'exclude'.</summary>
+    public static HashSet<Vector2Int> GetOccupiedCoords(Unit exclude)
+    {
+        HashSet<Vector2Int> result = new HashSet<Vector2Int>();
+
+        foreach (Unit u in allUnits)
+        {
+            if (u != null && u != exclude)
+                u.AddOccupiedCoords(result);
+        }
+
+        return result;
+    }
+
+    /// <summary>True if a unit other than 'exclude' stands on the tile or is about to walk onto it.</summary>
+    public static bool IsOccupied(Tile tile, Unit exclude)
+    {
+        return tile != null && GetOccupiedCoords(exclude).Contains(tile.Coords);
+    }
+
+    private static void NotifyOccupancyChanged()
+    {
+        OccupancyVersion++;
+    }
+
+    /// <summary>True while at least one unit is on the move.</summary>
+    public static bool AnyMoving
+    {
+        get
+        {
+            foreach (Unit u in allUnits)
+            {
+                if (u != null && u.IsMoving)
+                    return true;
+            }
+
+            return false;
+        }
+    }
     private MaterialPropertyBlock block;
     private bool isSelected;
 
@@ -54,6 +108,9 @@ public class Unit : MonoBehaviour
     /// <summary>Raised whenever the unit's health changes (damage or healing).</summary>
     public event System.Action<Unit> HealthChanged;
 
+    /// <summary>The side this unit fights for.</summary>
+    public Faction Faction => faction;
+
     public Vector2Int Coords => coords;
     public bool IsSelected => isSelected;
     public bool IsMoving => stepTarget != null;
@@ -62,6 +119,34 @@ public class Unit : MonoBehaviour
     {
         actionPoints = maxActionPoints;
         health = maxHealth;
+    }
+
+    private void OnEnable()
+    {
+        allUnits.Add(this);
+        NotifyOccupancyChanged();
+    }
+
+    private void OnDisable()
+    {
+        allUnits.Remove(this);
+        NotifyOccupancyChanged();
+    }
+
+    // A unit takes the tile it stands on, the tile it is running to and every tile still ahead on its route.
+    // That way two units can never be on one tile, and never plan to be.
+    private void AddOccupiedCoords(HashSet<Vector2Int> set)
+    {
+        set.Add(currentTile != null ? currentTile.Coords : coords);
+
+        if (stepTarget != null)
+            set.Add(stepTarget.Coords);
+
+        foreach (Tile t in waypoints)
+        {
+            if (t != null)
+                set.Add(t.Coords);
+        }
     }
 
     private void Update()
@@ -128,6 +213,7 @@ public class Unit : MonoBehaviour
             transform.position = stepPosition;
             currentTile = stepTarget;
             coords = currentTile.Coords;
+            NotifyOccupancyChanged();
             AdvanceStep();
         }
     }
@@ -156,26 +242,36 @@ public class Unit : MonoBehaviour
     }
 
     /// <summary>
-    /// Instantly puts the unit onto the given tile so that its bottom touches the tile's top face.
-    /// Costs no action points.
+    /// Instantly puts the unit onto the given tile (its feet on the tile's top face). Costs no action points.
+    /// Returns false (and does nothing) if another unit is on that tile.
     /// </summary>
-    public void PlaceOn(Tile tile)
+    public bool PlaceOn(Tile tile)
     {
+        if (tile == null || IsOccupied(tile, this))
+            return false;
+
         waypoints.Clear();
         stepTarget = null;
         currentTile = tile;
         coords = tile.Coords;
         transform.position = GetPositionOn(tile);
+        NotifyOccupancyChanged();
+        return true;
     }
 
     /// <summary>
-    /// Sends the unit towards the given tile, walking around walls. Every tile of the route costs 1 action
-    /// point, so with too few points the unit runs as far as its points allow and stops.
-    /// Returns false (and does nothing) if the unit has no action points or the tile cannot be reached.
-    /// A new call while moving makes the unit finish its current hop and then follow the new route.
+    /// Sends the unit towards the given tile, walking around walls and around other units.
+    /// Every tile of the route costs 1 action point, so with too few points the unit runs as far as its
+    /// points allow and stops.
+    /// Returns false (and does nothing) if the unit is already moving, has no action points, is already
+    /// standing on that tile, the tile is taken by another unit, or it cannot be reached.
     /// </summary>
     public bool MoveTo(Tile destination)
     {
+        // A move that has been started is always finished before a new order is accepted.
+        if (IsMoving)
+            return false;
+
         if (destination == null || actionPoints <= 0)
             return false;
 
@@ -185,25 +281,18 @@ public class Unit : MonoBehaviour
 
         if (currentTile == null)
             currentTile = grid.GetTile(coords);
-
-        // When already moving, plan from the tile we are heading to, so we never cut through a wall.
-        Tile from = stepTarget != null ? stepTarget : currentTile;
-        if (from == null)
+        if (currentTile == null)
             return false;
 
-        List<Tile> path = Pathfinder.FindPath(grid, from, destination);
+        // The route goes around other units, and a tile that another unit stands on
+        // (or is on its way to) cannot be the destination.
+        List<Tile> path = Pathfinder.FindPath(grid, currentTile, destination, this);
         if (path == null)
             return false;
 
         int cost = path.Count - 1;
         if (cost == 0)
-        {
-            // Clicked the tile we are already heading to: stop there.
-            if (stepTarget == null)
-                return false;
-            waypoints.Clear();
-            return true;
-        }
+            return false; // already standing there
 
         // Not enough points for the whole route: keep only the part we can pay for.
         int steps = Mathf.Min(cost, actionPoints);
@@ -217,9 +306,8 @@ public class Unit : MonoBehaviour
         for (int i = 1; i < route.Count; i++)
             waypoints.Enqueue(route[i]);
 
-        if (stepTarget == null)
-            AdvanceStep();
-
+        AdvanceStep();
+        NotifyOccupancyChanged();
         return true;
     }
 
@@ -258,19 +346,43 @@ public class Unit : MonoBehaviour
             if (rend == null)
                 continue;
 
-            if (selected)
+            if (selectionMaterialIndices != null && selectionMaterialIndices.Length > 0)
             {
-                rend.GetPropertyBlock(block);
-                block.SetColor(BaseColorId, selectedColor);
-                block.SetColor(ColorId, selectedColor);
-                rend.SetPropertyBlock(block);
+                foreach (int index in selectionMaterialIndices)
+                    Tint(rend, index, selected);
             }
             else
             {
-                // Drop the override so the material's own color is used again.
-                rend.SetPropertyBlock(null);
+                Tint(rend, -1, selected);
             }
         }
+    }
+
+    // materialIndex < 0 means the whole renderer, otherwise only that one material (sub-mesh).
+    private void Tint(Renderer rend, int materialIndex, bool selected)
+    {
+        if (!selected)
+        {
+            // Drop the override so the material's own color is used again.
+            if (materialIndex < 0)
+                rend.SetPropertyBlock(null);
+            else
+                rend.SetPropertyBlock(null, materialIndex);
+            return;
+        }
+
+        if (materialIndex < 0)
+            rend.GetPropertyBlock(block);
+        else
+            rend.GetPropertyBlock(block, materialIndex);
+
+        block.SetColor(BaseColorId, selectedColor);
+        block.SetColor(ColorId, selectedColor);
+
+        if (materialIndex < 0)
+            rend.SetPropertyBlock(block);
+        else
+            rend.SetPropertyBlock(block, materialIndex);
     }
 
     public void ToggleSelected()

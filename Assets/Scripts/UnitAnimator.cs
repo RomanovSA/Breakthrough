@@ -1,39 +1,33 @@
 using UnityEngine;
 
 /// <summary>
-/// Procedural run animation for the little man. It does not control the unit, it only watches it:
-///  - while the unit is moving, the legs and arms swing and the body bobs;
-///  - the figure turns to face the direction of travel;
-///  - when the unit stops, the limbs smoothly return to rest.
-/// The swing is tied to the distance travelled, so the steps always match the speed.
-/// Sits on the Model object (the part that turns); Body is the child that bobs.
+/// Connects the unit's movement to the character's Animator. It does not control the unit, it only watches it:
+///  - while the unit is moving, the Animator plays the Run clip, otherwise Idle;
+///  - the run clip is sped up or slowed down to match the real speed, so the steps fit the ground covered;
+///  - the figure turns to face the direction of travel.
+/// Sits on the Model object (the part that turns); the Animator lives on the character below it.
 /// </summary>
 public class UnitAnimator : MonoBehaviour
 {
-    [Header("Parts")]
-    [SerializeField] private Transform body;
-    [SerializeField] private Transform leftArm;
-    [SerializeField] private Transform rightArm;
-    [SerializeField] private Transform leftLeg;
-    [SerializeField] private Transform rightLeg;
+    private static readonly int MovingId = Animator.StringToHash("Moving");
+    private static readonly int RunSpeedId = Animator.StringToHash("RunSpeed");
 
-    [Header("Run cycle")]
-    [SerializeField] private float legSwing = 45f;      // degrees
-    [SerializeField] private float armSwing = 50f;      // degrees
-    [SerializeField] private float strideLength = 1.2f; // world units covered by one full cycle
-    [SerializeField] private float bobHeight = 0.04f;   // world units
-    [SerializeField] private float turnSpeed = 720f;    // degrees per second
-    [SerializeField] private float blendSpeed = 8f;     // how fast the run fades in and out
+    [SerializeField] private Animator animator;
+
+    [Header("Run")]
+    [Tooltip("World units covered by one full cycle of the Run clip (two steps).")]
+    [SerializeField] private float strideLength = 1.4f;
+    [SerializeField] private float minRunSpeed = 0.6f;
+    [SerializeField] private float maxRunSpeed = 3.5f;
+
+    [Header("Turning")]
+    [SerializeField] private float turnSpeed = 720f; // degrees per second
 
     private const float MovingThreshold = 0.1f;   // world units per second
     private const float TeleportThreshold = 20f;  // faster than this is a jump (PlaceOn), not running
 
     private Vector3 lastPosition;
     private bool hasLastPosition;
-    private float phase;
-    private float weight;
-    private Vector3 bodyRestPosition;
-    private bool bodyRestStored;
 
     private void OnEnable()
     {
@@ -50,12 +44,6 @@ public class UnitAnimator : MonoBehaviour
         if (dt <= 0f)
             return;
 
-        if (!bodyRestStored && body != null)
-        {
-            bodyRestPosition = body.localPosition;
-            bodyRestStored = true;
-        }
-
         Vector3 position = transform.position;
         Vector3 velocity = hasLastPosition ? (position - lastPosition) / dt : Vector3.zero;
         lastPosition = position;
@@ -67,32 +55,15 @@ public class UnitAnimator : MonoBehaviour
 
         if (moving)
         {
-            phase += speed * dt / Mathf.Max(0.01f, strideLength) * Mathf.PI * 2f;
-
             Quaternion target = Quaternion.LookRotation(flat / speed, Vector3.up);
             transform.rotation = Quaternion.RotateTowards(transform.rotation, target, turnSpeed * dt);
         }
 
-        weight = Mathf.MoveTowards(weight, moving ? 1f : 0f, blendSpeed * dt);
-        Apply();
-    }
-
-    private void Apply()
-    {
-        float swing = Mathf.Sin(phase) * weight;
-
-        SetSwing(leftLeg, swing * legSwing);
-        SetSwing(rightLeg, -swing * legSwing);
-        SetSwing(leftArm, -swing * armSwing);   // each arm swings against the leg on its side
-        SetSwing(rightArm, swing * armSwing);
-
-        if (body != null && bodyRestStored)
-            body.localPosition = bodyRestPosition + Vector3.up * (Mathf.Abs(Mathf.Cos(phase)) * bobHeight * weight);
-    }
-
-    private static void SetSwing(Transform limb, float angle)
-    {
-        if (limb != null)
-            limb.localRotation = Quaternion.Euler(angle, 0f, 0f);
+        if (animator != null)
+        {
+            animator.SetBool(MovingId, moving);
+            float multiplier = moving ? Mathf.Clamp(speed / Mathf.Max(0.01f, strideLength), minRunSpeed, maxRunSpeed) : 1f;
+            animator.SetFloat(RunSpeedId, multiplier);
+        }
     }
 }

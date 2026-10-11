@@ -5,8 +5,9 @@ using UnityEngine.InputSystem;
 #endif
 
 /// <summary>
-/// Click a unit to select it, click it again to deselect it.
-/// With a unit selected, click a tile to send the unit there.
+/// Click a unit of your own faction to select it, click it again to deselect it, click another one to
+/// switch. With a unit selected, click a tile to send the unit there.
+/// Units of other factions cannot be selected or given orders, clicking them does nothing.
 /// Clicks on UI (for example the End Turn button) are ignored.
 /// </summary>
 public class UnitSelector : MonoBehaviour
@@ -14,10 +15,16 @@ public class UnitSelector : MonoBehaviour
     [SerializeField] private Camera targetCamera;
     [SerializeField] private LayerMask raycastMask = ~0;
 
+    [Tooltip("Only units of this faction can be selected and given orders.")]
+    [SerializeField] private Faction controlledFaction = Faction.Player;
+
     private Unit selectedUnit;
 
     /// <summary>The unit that is currently selected (null if none).</summary>
     public Unit SelectedUnit => selectedUnit;
+
+    /// <summary>The faction the player is allowed to control.</summary>
+    public Faction ControlledFaction => controlledFaction;
 
     private void Update()
     {
@@ -50,6 +57,10 @@ public class UnitSelector : MonoBehaviour
 
     private void HandleUnitClick(Unit unit)
     {
+        // Not ours: it can neither be selected nor change the current selection.
+        if (unit.Faction != controlledFaction)
+            return;
+
         if (unit == selectedUnit)
         {
             unit.SetSelected(false);

@@ -21,10 +21,11 @@ public static class Pathfinder
     /// <summary>
     /// Returns a shortest route from start to goal (both included) in orthogonal steps, or null if the
     /// goal cannot be reached. The cost in action points is path.Count - 1.
+    /// If a mover is given, tiles taken by other units are treated as blocked (the mover's own tile is not).
     /// Among equally short routes the one that hugs the straight line from start to goal is chosen,
     /// which gives a staircase for diagonal trips (and lets SmoothPath turn it into a diagonal run).
     /// </summary>
-    public static List<Tile> FindPath(GridManager grid, Tile start, Tile goal)
+    public static List<Tile> FindPath(GridManager grid, Tile start, Tile goal, Unit mover = null)
     {
         if (grid == null || start == null || goal == null)
             return null;
@@ -36,7 +37,12 @@ public static class Pathfinder
             return null;
 
         // Distance (in steps) from every tile to the goal.
-        int[,] dist = BuildDistanceField(grid, e, size);
+        // Tiles taken by OTHER units cannot be walked through or stopped on.
+        HashSet<Vector2Int> blocked = mover != null ? Unit.GetOccupiedCoords(mover) : null;
+        if (blocked != null && blocked.Contains(e))
+            return null;
+
+        int[,] dist = BuildDistanceField(grid, e, size, blocked);
         if (dist[s.x, s.y] < 0)
             return null;
 
@@ -132,7 +138,7 @@ public static class Pathfinder
     /// (the start tile itself is not included). These are exactly the tiles a unit with maxSteps
     /// action points can walk to.
     /// </summary>
-    public static List<Tile> GetReachableTiles(GridManager grid, Tile start, int maxSteps)
+    public static List<Tile> GetReachableTiles(GridManager grid, Tile start, int maxSteps, Unit mover = null)
     {
         List<Tile> result = new List<Tile>();
         if (grid == null || start == null || maxSteps <= 0)
@@ -143,7 +149,8 @@ public static class Pathfinder
         if (!InBounds(s, size))
             return result;
 
-        int[,] dist = BuildDistanceField(grid, s, size);
+        HashSet<Vector2Int> blocked = mover != null ? Unit.GetOccupiedCoords(mover) : null;
+        int[,] dist = BuildDistanceField(grid, s, size, blocked);
         for (int x = 0; x < size.x; x++)
         {
             for (int y = 0; y < size.y; y++)
@@ -157,7 +164,7 @@ public static class Pathfinder
     }
 
     // Breadth-first search over side-adjacent steps. -1 means 'not reachable'.
-    private static int[,] BuildDistanceField(GridManager grid, Vector2Int source, Vector2Int size)
+    private static int[,] BuildDistanceField(GridManager grid, Vector2Int source, Vector2Int size, HashSet<Vector2Int> blocked)
     {
         int[,] dist = new int[size.x, size.y];
         for (int x = 0; x < size.x; x++)
@@ -174,7 +181,7 @@ public static class Pathfinder
             foreach (Vector2Int d in Directions)
             {
                 Vector2Int n = c + d;
-                if (!grid.CanStep(c, n) || dist[n.x, n.y] >= 0)
+                if (!grid.CanStep(c, n) || dist[n.x, n.y] >= 0 || (blocked != null && blocked.Contains(n)))
                     continue;
 
                 dist[n.x, n.y] = dist[c.x, c.y] + 1;
