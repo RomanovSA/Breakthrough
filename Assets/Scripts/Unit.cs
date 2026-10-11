@@ -16,6 +16,8 @@ public class Unit : MonoBehaviour
 
     [SerializeField] private Vector2Int coords;
     [SerializeField] private Color selectedColor = new Color(1f, 0.9f, 0.1f, 1f);
+    [Tooltip("Parts that change colour when the unit is selected. Empty = the whole unit.")]
+    [SerializeField] private Renderer[] selectionRenderers;
     [SerializeField, Min(0.1f)] private float moveSpeed = 4f; // world units per second
 
     [Header("Action points")]
@@ -26,7 +28,7 @@ public class Unit : MonoBehaviour
     [SerializeField, Min(1)] private int maxHealth = 100;
     [SerializeField, Min(0)] private int health = 100;
 
-    private Renderer unitRenderer;
+    private Renderer[] tintTargets;
     private MaterialPropertyBlock block;
     private bool isSelected;
 
@@ -221,41 +223,53 @@ public class Unit : MonoBehaviour
         return true;
     }
 
+    // The unit's pivot is at its feet, so it simply stands on the top face of the tile.
     private Vector3 GetPositionOn(Tile tile)
     {
         Renderer tileRenderer = tile.GetComponent<Renderer>();
-        Renderer rend = GetComponentInChildren<Renderer>();
-
-        float tileTop = tileRenderer != null ? tileRenderer.bounds.max.y : tile.transform.position.y;
-        float halfHeight = rend != null ? rend.bounds.extents.y : 0f;
-
         Vector3 tilePos = tile.transform.position;
-        return new Vector3(tilePos.x, tileTop + halfHeight, tilePos.z);
+        float tileTop = tileRenderer != null ? tileRenderer.bounds.max.y : tilePos.y;
+        return new Vector3(tilePos.x, tileTop, tilePos.z);
+    }
+
+    // The parts that change colour when the unit is selected: the ones assigned in Selection Renderers,
+    // or every renderer of the unit if none are assigned.
+    private Renderer[] GetTintTargets()
+    {
+        if (tintTargets == null)
+        {
+            tintTargets = selectionRenderers != null && selectionRenderers.Length > 0
+                ? selectionRenderers
+                : GetComponentsInChildren<Renderer>();
+        }
+
+        return tintTargets;
     }
 
     public void SetSelected(bool selected)
     {
         isSelected = selected;
 
-        if (unitRenderer == null)
-            unitRenderer = GetComponentInChildren<Renderer>();
-        if (unitRenderer == null)
-            return;
+        if (block == null)
+            block = new MaterialPropertyBlock();
 
-        if (selected)
+        foreach (Renderer rend in GetTintTargets())
         {
-            if (block == null)
-                block = new MaterialPropertyBlock();
+            if (rend == null)
+                continue;
 
-            unitRenderer.GetPropertyBlock(block);
-            block.SetColor(BaseColorId, selectedColor);
-            block.SetColor(ColorId, selectedColor);
-            unitRenderer.SetPropertyBlock(block);
-        }
-        else
-        {
-            // Drop the override so the material's own color is used again.
-            unitRenderer.SetPropertyBlock(null);
+            if (selected)
+            {
+                rend.GetPropertyBlock(block);
+                block.SetColor(BaseColorId, selectedColor);
+                block.SetColor(ColorId, selectedColor);
+                rend.SetPropertyBlock(block);
+            }
+            else
+            {
+                // Drop the override so the material's own color is used again.
+                rend.SetPropertyBlock(null);
+            }
         }
     }
 
