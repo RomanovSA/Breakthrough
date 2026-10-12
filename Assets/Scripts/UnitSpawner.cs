@@ -27,6 +27,9 @@ public class UnitSpawner : MonoBehaviour
 
     private bool spawned;
 
+    /// <summary>Raised after all units have been spawned (and placed on their tiles).</summary>
+    public event System.Action UnitsSpawned;
+
     private void OnEnable()
     {
         if (grid == null)
@@ -100,6 +103,7 @@ public class UnitSpawner : MonoBehaviour
                 {
                     Debug.LogWarning("UnitSpawner: there are more units than tiles, the rest was not spawned.", this);
                     spawned = true;
+                    UnitsSpawned?.Invoke();
                     return result;
                 }
 
@@ -118,6 +122,7 @@ public class UnitSpawner : MonoBehaviour
         }
 
         spawned = true;
+        UnitsSpawned?.Invoke();
         return result;
     }
 

@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.EventSystems;
 #if ENABLE_INPUT_SYSTEM
@@ -5,8 +6,11 @@ using UnityEngine.InputSystem;
 #endif
 
 /// <summary>
-/// Click a unit of your own faction to select it, click it again to deselect it, click another one to
-/// switch. With a unit selected, click a tile to send the unit there.
+/// Who is selected, and how the selection changes:
+///  - when the units appear, the first unit of the player's faction that can act is selected;
+///  - click a unit of your own faction to select it, click it again to deselect it;
+///  - Tab selects the next of your units that still has action points;
+///  - with a unit selected, click a tile to send the unit there.
 /// Units of other factions cannot be selected or given orders, clicking them does nothing.
 /// Clicks on UI (for example the End Turn button) are ignored.
 /// </summary>
@@ -19,6 +23,7 @@ public class UnitSelector : MonoBehaviour
     [SerializeField] private Faction controlledFaction = Faction.Player;
 
     private Unit selectedUnit;
+    private UnitSpawner spawner;
 
     /// <summary>The unit that is currently selected (null if none).</summary>
     public Unit SelectedUnit => selectedUnit;
@@ -26,8 +31,37 @@ public class UnitSelector : MonoBehaviour
     /// <summary>The faction the player is allowed to control.</summary>
     public Faction ControlledFaction => controlledFaction;
 
+    private void OnEnable()
+    {
+        spawner = FindFirstObjectByType<UnitSpawner>();
+        if (spawner != null)
+            spawner.UnitsSpawned += OnUnitsSpawned;
+    }
+
+    private void OnDisable()
+    {
+        if (spawner != null)
+            spawner.UnitsSpawned -= OnUnitsSpawned;
+    }
+
+    private void Start()
+    {
+        // In case the units were spawned before we started listening.
+        if (selectedUnit == null)
+            SelectFirstAvailable();
+    }
+
+    private void OnUnitsSpawned()
+    {
+        // The units are new, whatever was selected before is gone.
+        SelectFirstAvailable();
+    }
+
     private void Update()
     {
+        if (TabPressed())
+            SelectNextAvailable();
+
         if (!TryGetClick(out Vector2 screenPos))
             return;
 
@@ -55,6 +89,70 @@ public class UnitSelector : MonoBehaviour
             selectedUnit.MoveTo(tile);
     }
 
+    /// <summary>Selects the unit (and deselects the previous one). Only units of the controlled faction can be selected.</summary>
+    public bool Select(Unit unit)
+    {
+        if (unit == null || unit.Faction != controlledFaction)
+            return false;
+
+        if (unit == selectedUnit)
+            return true;
+
+        Deselect();
+        selectedUnit = unit;
+        unit.SetSelected(true);
+        return true;
+    }
+
+    public void Deselect()
+    {
+        if (selectedUnit != null)
+            selectedUnit.SetSelected(false);
+
+        selectedUnit = null;
+    }
+
+    /// <summary>
+    /// Selects the next unit (in spawn order, wrapping around) that still has action points.
+    /// With nothing selected it picks the first such unit. Returns false if no unit can act.
+    /// </summary>
+    public bool SelectNextAvailable()
+    {
+        List<Unit> mine = CollectControlledUnits();
+        if (mine.Count == 0)
+            return false;
+
+        int start = selectedUnit != null ? mine.IndexOf(selectedUnit) : -1;
+
+        for (int i = 1; i <= mine.Count; i++)
+        {
+            Unit candidate = mine[(start + i) % mine.Count];
+            if (candidate.ActionPoints > 0)
+                return Select(candidate);
+        }
+
+        return false;
+    }
+
+    /// <summary>Drops the current selection and selects the first unit that can act (start of a turn).</summary>
+    public bool SelectFirstAvailable()
+    {
+        Deselect();
+        return SelectNextAvailable();
+    }
+
+    private List<Unit> CollectControlledUnits()
+    {
+        List<Unit> result = new List<Unit>();
+        foreach (Unit u in Unit.All)
+        {
+            if (u != null && u.Faction == controlledFaction)
+                result.Add(u);
+        }
+
+        return result;
+    }
+
     private void HandleUnitClick(Unit unit)
     {
         // Not ours: it can neither be selected nor change the current selection.
@@ -62,17 +160,22 @@ public class UnitSelector : MonoBehaviour
             return;
 
         if (unit == selectedUnit)
-        {
-            unit.SetSelected(false);
-            selectedUnit = null;
-            return;
-        }
+            Deselect();
+        else
+            Select(unit);
+    }
 
-        if (selectedUnit != null)
-            selectedUnit.SetSelected(false);
-
-        selectedUnit = unit;
-        unit.SetSelected(true);
+    private static bool TabPressed()
+    {
+#if ENABLE_INPUT_SYSTEM
+        if (Keyboard.current != null && Keyboard.current.tabKey.wasPressedThisFrame)
+            return true;
+#endif
+#if ENABLE_LEGACY_INPUT_MANAGER
+        if (Input.GetKeyDown(KeyCode.Tab))
+            return true;
+#endif
+        return false;
     }
 
     private static bool TryGetClick(out Vector2 screenPos)
