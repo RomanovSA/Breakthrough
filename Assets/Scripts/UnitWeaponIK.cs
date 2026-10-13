@@ -6,6 +6,7 @@ using UnityEngine;
 /// grip targets that sit on the weapon, and to bend the elbows towards the hint points.
 /// Must be on the same object as the Animator, and the Animator controller layer needs 'IK Pass' enabled.
 /// </summary>
+[ExecuteAlways] // so the hand placement is also visible (and testable) in the editor, not only in Play mode
 [RequireComponent(typeof(Animator))]
 public class UnitWeaponIK : MonoBehaviour
 {
