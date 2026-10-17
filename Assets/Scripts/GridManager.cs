@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 #if UNITY_EDITOR
 using UnityEditor;
@@ -32,6 +33,8 @@ public class GridManager : MonoBehaviour
     [SerializeField] private bool buildOnStart = true;
 
     private Tile[,] map;
+    private List<Tile> tileList;
+    private List<Wall> wallList;
 
     /// <summary>Raised after the field has been (re)built. Subscribe to react to a new field.</summary>
     public event System.Action GridBuilt;
@@ -119,6 +122,7 @@ public class GridManager : MonoBehaviour
             }
         }
 
+        wallList = null;
         CurrentSettings = settings;
         GridBuilt?.Invoke();
     }
@@ -142,6 +146,8 @@ public class GridManager : MonoBehaviour
         }
 
         map = null;
+        tileList = null;
+        wallList = null;
         CurrentSettings = null;
     }
 
@@ -208,6 +214,160 @@ public class GridManager : MonoBehaviour
         return false;
     }
 
+    /// <summary>Distance between the centres of two neighbouring tiles, in world units.</summary>
+    public float TileSize
+    {
+        get
+        {
+            Tile a = GetTile(Vector2Int.zero);
+            Tile b = GetTile(Vector2Int.right);
+            if (a != null && b != null)
+                return Vector3.Distance(a.transform.position, b.transform.position);
+
+            return CurrentSettings != null ? CurrentSettings.tileSize : 1f;
+        }
+    }
+
+    /// <summary>
+    /// How far one can see from a world position along a flat direction, in world units: up to maxDistance,
+    /// but not through a wall and not beyond the edge of the field.
+    /// The field is assumed to be lined up with the world axes (it is built that way).
+    /// </summary>
+    public float VisibleDistance(Vector3 origin, Vector3 direction, float maxDistance)
+    {
+        Tile first = GetTile(Vector2Int.zero);
+        Vector2Int size = Size;
+        Vector2 dir = new Vector2(direction.x, direction.z);
+        if (first == null || dir.sqrMagnitude < 1e-8f || maxDistance <= 0f)
+            return maxDistance;
+        dir.Normalize();
+
+        // work in tile units: tile (i, j) is the square from i - 0.5 to i + 0.5 and j - 0.5 to j + 0.5
+        float s = TileSize;
+        Vector3 p0 = first.transform.position;
+        Vector2 o = new Vector2((origin.x - p0.x) / s, (origin.z - p0.z) / s);
+        float maxT = maxDistance / s;
+
+        int i = Mathf.RoundToInt(o.x);
+        int j = Mathf.RoundToInt(o.y);
+        if (i < 0 || j < 0 || i >= size.x || j >= size.y)
+            return maxDistance;
+
+        int stepX = dir.x > 0f ? 1 : -1;
+        int stepY = dir.y > 0f ? 1 : -1;
+        float tDeltaX = Mathf.Abs(dir.x) > 1e-6f ? 1f / Mathf.Abs(dir.x) : float.PositiveInfinity;
+        float tDeltaY = Mathf.Abs(dir.y) > 1e-6f ? 1f / Mathf.Abs(dir.y) : float.PositiveInfinity;
+        float tMaxX = Mathf.Abs(dir.x) > 1e-6f ? ((i + stepX * 0.5f) - o.x) / dir.x : float.PositiveInfinity;
+        float tMaxY = Mathf.Abs(dir.y) > 1e-6f ? ((j + stepY * 0.5f) - o.y) / dir.y : float.PositiveInfinity;
+
+        // a ray can cross at most this many tile borders before it has left the field
+        int maxSteps = size.x + size.y + 4;
+        for (int step = 0; step < maxSteps; step++)
+        {
+            bool crossX = tMaxX < tMaxY;
+            float t = crossX ? tMaxX : tMaxY;
+            if (t >= maxT)
+                return maxDistance;
+
+            Vector2Int current = new Vector2Int(i, j);
+            Vector2Int next = crossX ? new Vector2Int(i + stepX, j) : new Vector2Int(i, j + stepY);
+
+            if (next.x < 0 || next.y < 0 || next.x >= size.x || next.y >= size.y)
+                return t * s;                       // the edge of the field
+            if (IsEdgeBlocked(current, next))
+                return t * s;                       // a wall
+
+            i = next.x;
+            j = next.y;
+            if (crossX) tMaxX += tDeltaX; else tMaxY += tDeltaY;
+        }
+
+        return maxDistance;
+    }
+
+    /// <summary>All the tiles of the field.</summary>
+    public IReadOnlyList<Tile> Tiles
+    {
+        get
+        {
+            EnsureMap();
+            return tileList != null ? (IReadOnlyList<Tile>)tileList : new List<Tile>();
+        }
+    }
+
+    /// <summary>All the walls of the field.</summary>
+    public IReadOnlyList<Wall> Walls
+    {
+        get
+        {
+            if (wallList == null)
+                wallList = new List<Wall>(GetComponentsInChildren<Wall>());
+            return wallList;
+        }
+    }
+
+    /// <summary>
+    /// Works out which tiles are in view of someone standing at 'origin' and looking along 'facing' with the given
+    /// view angle (degrees, the whole cone) and range (tiles). A tile counts as seen if any of five points in it
+    /// (the middle and four spots near its corners) lies inside the cone with a clear line of sight, i.e. the same
+    /// area the vision fan is drawn for. The tile the viewer stands on is always seen.
+    /// </summary>
+    public void ComputeVisibleTiles(Vector3 origin, Vector3 facing, float viewAngle, float rangeTiles, HashSet<Vector2Int> result)
+    {
+        result.Clear();
+        EnsureMap();
+        if (tileList == null)
+            return;
+
+        float s = TileSize;
+        float range = rangeTiles * s;
+        float halfAngle = Mathf.Clamp(viewAngle, 0f, 360f) * 0.5f;
+        facing.y = 0f;
+        facing = facing.sqrMagnitude > 1e-6f ? facing.normalized : Vector3.forward;
+
+        float spot = 0.4f * s;
+        Vector3[] offsets =
+        {
+            Vector3.zero,
+            new Vector3(spot, 0f, spot), new Vector3(-spot, 0f, spot), new Vector3(spot, 0f, -spot), new Vector3(-spot, 0f, -spot)
+        };
+
+        foreach (Tile tile in tileList)
+        {
+            if (tile == null)
+                continue;
+
+            Vector3 centre = tile.transform.position;
+            Vector3 toCentre = centre - origin; toCentre.y = 0f;
+            if (toCentre.magnitude > range + 0.8f * s)
+                continue; // clearly out of range
+
+            for (int i = 0; i < offsets.Length; i++)
+            {
+                if (PointInView(origin, facing, halfAngle, range, centre + offsets[i]))
+                {
+                    result.Add(tile.Coords);
+                    break;
+                }
+            }
+        }
+    }
+
+    private bool PointInView(Vector3 origin, Vector3 facing, float halfAngle, float range, Vector3 point)
+    {
+        Vector3 d = point - origin;
+        d.y = 0f;
+        float dist = d.magnitude;
+        if (dist < 0.05f)
+            return true;                      // right under the viewer's feet
+        if (dist > range)
+            return false;
+        if (Vector3.Angle(facing, d) > halfAngle + 0.01f)
+            return false;
+
+        return VisibleDistance(origin, d, dist) >= dist - 0.001f;   // nothing in the way
+    }
+
     private void SetEdgeBlocked(Vector2Int a, Vector2Int b, bool blocked)
     {
         Vector2Int d = b - a;
@@ -265,6 +425,7 @@ public class GridManager : MonoBehaviour
         map = new Tile[maxX + 1, maxY + 1];
         foreach (Tile t in tiles)
             map[t.Coords.x, t.Coords.y] = t;
+        tileList = new List<Tile>(tiles);
     }
 
     private Tile SpawnTile(Transform parent)
@@ -289,6 +450,11 @@ public class GridManager : MonoBehaviour
         GameObject wall = InstantiateWall(parent);
         wall.name = $"Wall_{a.x}_{a.y}_{b.x}_{b.y}";
         wall.transform.rotation = a.y == b.y ? Quaternion.Euler(0f, 90f, 0f) : Quaternion.identity;
+
+        Wall wallInfo = wall.GetComponent<Wall>();
+        if (wallInfo == null)
+            wallInfo = wall.AddComponent<Wall>();
+        wallInfo.Init(a, b);
 
         Renderer tileRenderer = tileA.GetComponent<Renderer>();
         Renderer wallRenderer = wall.GetComponentInChildren<Renderer>();

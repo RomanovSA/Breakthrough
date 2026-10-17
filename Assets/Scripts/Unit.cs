@@ -26,6 +26,16 @@ public class Unit : MonoBehaviour
     [SerializeField] private int[] selectionMaterialIndices;
     [SerializeField, Min(0.1f)] private float moveSpeed = 4f; // world units per second
 
+    [Header("Vision")]
+    [Tooltip("Width of the field of view in degrees (the whole cone, not half of it).")]
+    [SerializeField, Range(1f, 360f)] private float viewAngle = 30f;
+    [Tooltip("How far the unit sees, in tiles.")]
+    [SerializeField, Min(0f)] private float viewRange = 5f;
+    [Tooltip("The part of the unit that turns (the Model object). Its forward direction is where the unit looks.")]
+    [SerializeField] private Transform facing;
+    [Tooltip("Switched off while the selected unit cannot see this unit (its health bar and vision fan).")]
+    [SerializeField] private GameObject[] hiddenWhileUnseen;
+
     [Header("Action points")]
     [SerializeField, Min(0)] private int maxActionPoints = 4;
     [SerializeField, Min(0)] private int actionPoints = 4;
@@ -34,7 +44,9 @@ public class Unit : MonoBehaviour
     [SerializeField, Min(1)] private int maxHealth = 100;
     [SerializeField, Min(0)] private int health = 100;
 
-    private Renderer[] tintTargets;
+    private Renderer[] visualRenderers;
+    private bool isFogged;
+    private float fogFactor = 1f;
 
     private static readonly List<Unit> allUnits = new List<Unit>();
 
@@ -111,8 +123,28 @@ public class Unit : MonoBehaviour
     /// <summary>The side this unit fights for.</summary>
     public Faction Faction => faction;
 
+    /// <summary>Width of the field of view in degrees.</summary>
+    public float ViewAngle => viewAngle;
+
+    /// <summary>How far the unit sees, in tiles.</summary>
+    public float ViewRange => viewRange;
+
+    /// <summary>The direction the unit looks in, flat on the ground (length 1).</summary>
+    public Vector3 FacingDirection
+    {
+        get
+        {
+            Vector3 v = (facing != null ? facing : transform).forward;
+            v.y = 0f;
+            return v.sqrMagnitude > 1e-6f ? v.normalized : Vector3.forward;
+        }
+    }
+
     public Vector2Int Coords => coords;
     public bool IsSelected => isSelected;
+
+    /// <summary>True while the unit is in the dark: the selected unit cannot see it.</summary>
+    public bool IsFogged => isFogged;
     public bool IsMoving => stepTarget != null;
 
     private void Awake()
@@ -320,69 +352,112 @@ public class Unit : MonoBehaviour
         return new Vector3(tilePos.x, tileTop, tilePos.z);
     }
 
-    // The parts that change colour when the unit is selected: the ones assigned in Selection Renderers,
-    // or every renderer of the unit if none are assigned.
-    private Renderer[] GetTintTargets()
+    // ---- how the unit looks: selected (shirt turns yellow) and / or in the dark (everything is darkened) ----
+    // This is the only place that writes the colour overrides, so the two effects never overwrite each other.
+
+    private Renderer[] GetVisualRenderers()
     {
-        if (tintTargets == null)
+        if (visualRenderers == null)
         {
-            tintTargets = selectionRenderers != null && selectionRenderers.Length > 0
-                ? selectionRenderers
-                : GetComponentsInChildren<Renderer>();
+            Transform body = facing != null ? facing : transform;
+            var list = new List<Renderer>();
+            foreach (Renderer r in body.GetComponentsInChildren<Renderer>(true))
+            {
+                if (r.GetComponent<UnitVisionDisplay>() == null)   // the vision fan keeps its own colours
+                    list.Add(r);
+            }
+
+            visualRenderers = list.ToArray();
         }
 
-        return tintTargets;
+        return visualRenderers;
+    }
+
+    // Is this material of this renderer one of the parts that turn yellow when the unit is selected?
+    private bool IsSelectionPart(Renderer rend, int materialIndex)
+    {
+        if (!isSelected)
+            return false;
+
+        bool wholeUnit = selectionRenderers == null || selectionRenderers.Length == 0;
+        if (wholeUnit)
+            return true;
+
+        if (System.Array.IndexOf(selectionRenderers, rend) < 0)
+            return false;
+
+        return selectionMaterialIndices == null || selectionMaterialIndices.Length == 0
+            || System.Array.IndexOf(selectionMaterialIndices, materialIndex) >= 0;
+    }
+
+    private void RefreshVisuals()
+    {
+        if (block == null)
+            block = new MaterialPropertyBlock();
+
+        foreach (Renderer rend in GetVisualRenderers())
+        {
+            if (rend == null)
+                continue;
+
+            Material[] mats = rend.sharedMaterials;
+            for (int i = 0; i < mats.Length; i++)
+            {
+                bool selectedPart = IsSelectionPart(rend, i);
+                if ((!selectedPart && !isFogged) || mats[i] == null)
+                {
+                    rend.SetPropertyBlock(null, i);       // the material's own colour
+                    continue;
+                }
+
+                Color c;
+                if (selectedPart)
+                    c = selectedColor;
+                else if (mats[i].HasProperty("_BaseColor"))
+                    c = mats[i].GetColor("_BaseColor");
+                else if (mats[i].HasProperty("_Color"))
+                    c = mats[i].GetColor("_Color");
+                else
+                    c = Color.white;
+
+                if (isFogged)
+                    c = new Color(c.r * fogFactor, c.g * fogFactor, c.b * fogFactor, c.a);
+
+                rend.GetPropertyBlock(block, i);
+                block.SetColor(BaseColorId, c);
+                block.SetColor(ColorId, c);
+                rend.SetPropertyBlock(block, i);
+            }
+        }
     }
 
     public void SetSelected(bool selected)
     {
         isSelected = selected;
-
-        if (block == null)
-            block = new MaterialPropertyBlock();
-
-        foreach (Renderer rend in GetTintTargets())
-        {
-            if (rend == null)
-                continue;
-
-            if (selectionMaterialIndices != null && selectionMaterialIndices.Length > 0)
-            {
-                foreach (int index in selectionMaterialIndices)
-                    Tint(rend, index, selected);
-            }
-            else
-            {
-                Tint(rend, -1, selected);
-            }
-        }
+        RefreshVisuals();
     }
 
-    // materialIndex < 0 means the whole renderer, otherwise only that one material (sub-mesh).
-    private void Tint(Renderer rend, int materialIndex, bool selected)
+    /// <summary>
+    /// Puts the unit 'in the dark': everything about it is darkened by the factor and its health bar and vision
+    /// fan are hidden (the selected unit cannot see it). SetFogged(false, ...) brings it back.
+    /// </summary>
+    public void SetFogged(bool fogged, float factor)
     {
-        if (!selected)
-        {
-            // Drop the override so the material's own color is used again.
-            if (materialIndex < 0)
-                rend.SetPropertyBlock(null);
-            else
-                rend.SetPropertyBlock(null, materialIndex);
+        if (isFogged == fogged && (!fogged || Mathf.Approximately(fogFactor, factor)))
             return;
+
+        isFogged = fogged;
+        fogFactor = factor;
+        RefreshVisuals();
+
+        if (hiddenWhileUnseen != null)
+        {
+            foreach (GameObject go in hiddenWhileUnseen)
+            {
+                if (go != null)
+                    go.SetActive(!fogged);
+            }
         }
-
-        if (materialIndex < 0)
-            rend.GetPropertyBlock(block);
-        else
-            rend.GetPropertyBlock(block, materialIndex);
-
-        block.SetColor(BaseColorId, selectedColor);
-        block.SetColor(ColorId, selectedColor);
-
-        if (materialIndex < 0)
-            rend.SetPropertyBlock(block);
-        else
-            rend.SetPropertyBlock(block, materialIndex);
     }
 
     public void ToggleSelected()

@@ -25,6 +25,8 @@ public class Tile : MonoBehaviour
     private MaterialPropertyBlock block;
     private bool isHovered;
     private bool isReachable;
+    private bool isShaded;
+    private float shadeFactor = 1f;
 
     public Vector2Int Coords => coords;
 
@@ -72,6 +74,23 @@ public class Tile : MonoBehaviour
         ApplyVisual();
     }
 
+    /// <summary>True while the tile is darkened because the selected unit cannot see it.</summary>
+    public bool IsShaded => isShaded;
+
+    /// <summary>
+    /// Darkens the tile (the selected unit cannot see it). The blue hover colour and the green reachable colour
+    /// are shown at full brightness even on a darkened tile.
+    /// </summary>
+    public void SetShaded(bool shaded, float factor)
+    {
+        if (isShaded == shaded && (!shaded || Mathf.Approximately(shadeFactor, factor)))
+            return;
+
+        isShaded = shaded;
+        shadeFactor = factor;
+        ApplyVisual();
+    }
+
     private void ApplyVisual()
     {
         if (tileRenderer == null)
@@ -79,14 +98,20 @@ public class Tile : MonoBehaviour
         if (tileRenderer == null)
             return;
 
-        if (!isHovered && !isReachable)
+        if (!isHovered && !isReachable && !isShaded)
         {
             // Drop the override so the material's own color is used again.
             tileRenderer.SetPropertyBlock(null);
             return;
         }
 
-        Color color = isHovered ? highlightColor : reachableColor;
+        Color color;
+        if (isHovered)
+            color = highlightColor;
+        else if (isReachable)
+            color = reachableColor;
+        else
+            color = Darken(MaterialColor(tileRenderer.sharedMaterial), shadeFactor);
 
         if (block == null)
             block = new MaterialPropertyBlock();
@@ -95,5 +120,18 @@ public class Tile : MonoBehaviour
         block.SetColor(BaseColorId, color);
         block.SetColor(ColorId, color);
         tileRenderer.SetPropertyBlock(block);
+    }
+
+    private static Color MaterialColor(Material m)
+    {
+        if (m == null) return Color.white;
+        if (m.HasProperty("_BaseColor")) return m.GetColor("_BaseColor");
+        if (m.HasProperty("_Color")) return m.GetColor("_Color");
+        return Color.white;
+    }
+
+    private static Color Darken(Color c, float factor)
+    {
+        return new Color(c.r * factor, c.g * factor, c.b * factor, c.a);
     }
 }
