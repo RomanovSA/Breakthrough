@@ -460,6 +460,28 @@ public class Unit : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// Turns the unit, and with it its field of view, towards a point on the ground. Costs no action points.
+    /// Returns false (and does nothing) while the unit is moving, or when the point is right where the unit stands.
+    /// </summary>
+    public bool LookAt(Vector3 worldPoint)
+    {
+        if (IsMoving)
+            return false;
+
+        Vector3 d = worldPoint - transform.position;
+        d.y = 0f;
+        if (d.sqrMagnitude < 0.0225f)       // closer than 15 cm: no direction to speak of
+            return false;
+
+        UnitAnimator turner = GetComponentInChildren<UnitAnimator>();
+        if (turner == null)
+            return false;
+
+        turner.LookAt(worldPoint);
+        return true;
+    }
+
     public void ToggleSelected()
     {
         SetSelected(!isSelected);

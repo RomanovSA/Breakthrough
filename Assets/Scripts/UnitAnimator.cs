@@ -36,6 +36,8 @@ public class UnitAnimator : MonoBehaviour
     private bool aiming;
     private bool hasAimPoint;
     private Vector3 aimPoint;
+    private bool hasLookPoint;
+    private Vector3 lookPoint;
 
     /// <summary>True while the rifle is raised.</summary>
     public bool IsAiming => aiming;
@@ -82,6 +84,16 @@ public class UnitAnimator : MonoBehaviour
             animator.SetTrigger(ShootId);
     }
 
+    /// <summary>
+    /// Turns the unit on the spot until it faces the given point (flat, the height is ignored).
+    /// Cancelled when the unit starts to move.
+    /// </summary>
+    public void LookAt(Vector3 worldPoint)
+    {
+        hasLookPoint = true;
+        lookPoint = worldPoint;
+    }
+
     // Handy for trying the animations out in Play mode: right-click the Unit Animator component header.
     [ContextMenu("Test: raise / lower the rifle")]
     private void TestToggleAim()
@@ -117,6 +129,8 @@ public class UnitAnimator : MonoBehaviour
         Vector3 flat = new Vector3(velocity.x, 0f, velocity.z);
         float speed = flat.magnitude;
         bool moving = speed > MovingThreshold && speed < TeleportThreshold;
+        if (moving)
+            hasLookPoint = false;          // running overrides a pending 'look there'
 
         // A unit cannot aim while it is running.
         if (moving && aiming)
@@ -127,14 +141,23 @@ public class UnitAnimator : MonoBehaviour
             Quaternion target = Quaternion.LookRotation(flat / speed, Vector3.up);
             transform.rotation = Quaternion.RotateTowards(transform.rotation, target, turnSpeed * dt);
         }
-        else if (hasAimPoint)
+        else if (hasLookPoint || hasAimPoint)
         {
-            Vector3 toTarget = aimPoint - position;
+            // turn on the spot: towards the point we were told to look at, or the one we are aiming at
+            Vector3 toTarget = (hasLookPoint ? lookPoint : aimPoint) - position;
             toTarget.y = 0f;
             if (toTarget.sqrMagnitude > 0.0001f)
             {
                 Quaternion target = Quaternion.LookRotation(toTarget.normalized, Vector3.up);
                 transform.rotation = Quaternion.RotateTowards(transform.rotation, target, turnSpeed * dt);
+
+                // a one-off 'look there' is finished once we face it; aiming keeps following its point
+                if (hasLookPoint && Quaternion.Angle(transform.rotation, target) < 0.5f)
+                    hasLookPoint = false;
+            }
+            else
+            {
+                hasLookPoint = false;
             }
         }
 

@@ -10,7 +10,8 @@ using UnityEngine.InputSystem;
 ///  - when the units appear, the first unit of the player's faction that can act is selected;
 ///  - click a unit of your own faction to select it, click it again to deselect it;
 ///  - Tab selects the next of your units that still has action points;
-///  - with a unit selected, click a tile to send the unit there.
+///  - with a unit selected, click a tile to send the unit there;
+///  - right click: the selected unit turns its field of view towards the cursor.
 /// Units of other factions cannot be selected or given orders, clicking them does nothing.
 /// Clicks on UI (for example the End Turn button) are ignored.
 /// </summary>
@@ -61,6 +62,9 @@ public class UnitSelector : MonoBehaviour
     {
         if (TabPressed())
             SelectNextAvailable();
+
+        if (TryGetRightClick(out Vector2 rightClickPos))
+            HandleRightClick(rightClickPos);
 
         if (!TryGetClick(out Vector2 screenPos))
             return;
@@ -163,6 +167,50 @@ public class UnitSelector : MonoBehaviour
             Deselect();
         else
             Select(unit);
+    }
+
+    // Right click: the selected unit turns its field of view towards the cursor.
+    private void HandleRightClick(Vector2 screenPos)
+    {
+        if (selectedUnit == null)
+            return;
+
+        if (EventSystem.current != null && EventSystem.current.IsPointerOverGameObject())
+            return;
+
+        if (targetCamera == null)
+            targetCamera = Camera.main;
+        if (targetCamera == null)
+            return;
+
+        // where the cursor points on the ground the unit stands on
+        Ray ray = targetCamera.ScreenPointToRay(screenPos);
+        Plane ground = new Plane(Vector3.up, selectedUnit.transform.position);
+        if (!ground.Raycast(ray, out float distance))
+            return;
+
+        selectedUnit.LookAt(ray.GetPoint(distance));
+    }
+
+    private static bool TryGetRightClick(out Vector2 screenPos)
+    {
+        screenPos = default;
+
+#if ENABLE_INPUT_SYSTEM
+        if (Mouse.current != null && Mouse.current.rightButton.wasPressedThisFrame)
+        {
+            screenPos = Mouse.current.position.ReadValue();
+            return true;
+        }
+#endif
+#if ENABLE_LEGACY_INPUT_MANAGER
+        if (Input.GetMouseButtonDown(1))
+        {
+            screenPos = Input.mousePosition;
+            return true;
+        }
+#endif
+        return false;
     }
 
     private static bool TabPressed()
