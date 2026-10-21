@@ -6,7 +6,8 @@ using UnityEngine;
 ///
 /// For COST purposes a unit cannot move diagonally: it walks from tile to side-adjacent tile
 /// and every tile entered costs 1 action point, so the cost of a route is its number of
-/// orthogonal steps (a 'Manhattan' distance that respects walls).
+/// orthogonal steps (a 'Manhattan' distance that respects walls). Climbing a ladder, up to a roof or down
+/// again, costs GridManager.LadderCost points instead.
 ///
 /// For ANIMATION the unit may still cut a corner diagonally (see SmoothPath), but that
 /// shortcut is charged as the two orthogonal steps it replaces, so the cost never changes.
@@ -27,7 +28,7 @@ public static class Pathfinder
     /// </summary>
     public static List<Tile> FindPath(GridManager grid, Tile start, Tile goal, Unit mover = null)
     {
-        if (grid == null || start == null || goal == null)
+        if (grid == null || start == null || goal == null || (goal.IsBlocked && !goal.HasRoof))
             return null;
 
         Vector2Int size = grid.Size;
@@ -62,8 +63,8 @@ public static class Pathfinder
             foreach (Vector2Int d in Directions)
             {
                 Vector2Int n = current + d;
-                if (!grid.CanStep(current, n) || dist[n.x, n.y] != here - 1)
-                    continue; // not a step along a shortest route
+                if (!grid.CanStep(current, n) || dist[n.x, n.y] < 0 || dist[n.x, n.y] != here - grid.StepCost(current, n))
+                    continue; // not a step along a cheapest route
 
                 float deviation = Mathf.Abs((n.x - s.x) * line.y - (n.y - s.y) * line.x);
 
@@ -163,7 +164,8 @@ public static class Pathfinder
         return result;
     }
 
-    // Breadth-first search over side-adjacent steps. -1 means 'not reachable'.
+    // Cheapest cost (in action points) from the source to every tile over side-adjacent steps; a ladder costs more than a
+    // step (GridManager.StepCost). -1 means 'not reachable'.
     private static int[,] BuildDistanceField(GridManager grid, Vector2Int source, Vector2Int size, HashSet<Vector2Int> blocked)
     {
         int[,] dist = new int[size.x, size.y];
@@ -171,21 +173,30 @@ public static class Pathfinder
             for (int y = 0; y < size.y; y++)
                 dist[x, y] = -1;
 
-        Queue<Vector2Int> queue = new Queue<Vector2Int>();
+        SortedSet<(int cost, int x, int y)> open = new SortedSet<(int cost, int x, int y)>();
         dist[source.x, source.y] = 0;
-        queue.Enqueue(source);
+        open.Add((0, source.x, source.y));
 
-        while (queue.Count > 0)
+        while (open.Count > 0)
         {
-            Vector2Int c = queue.Dequeue();
+            (int cost, int x, int y) item = open.Min;
+            open.Remove(item);
+            if (item.cost > dist[item.x, item.y])
+                continue;                                  // an older, longer entry
+
+            Vector2Int c = new Vector2Int(item.x, item.y);
             foreach (Vector2Int d in Directions)
             {
                 Vector2Int n = c + d;
-                if (!grid.CanStep(c, n) || dist[n.x, n.y] >= 0 || (blocked != null && blocked.Contains(n)))
+                if (!grid.CanStep(c, n) || (blocked != null && blocked.Contains(n)))
                     continue;
 
-                dist[n.x, n.y] = dist[c.x, c.y] + 1;
-                queue.Enqueue(n);
+                int next = item.cost + grid.StepCost(c, n);
+                if (dist[n.x, n.y] >= 0 && dist[n.x, n.y] <= next)
+                    continue;
+
+                dist[n.x, n.y] = next;
+                open.Add((next, n.x, n.y));
             }
         }
 

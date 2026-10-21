@@ -11,14 +11,15 @@ using UnityEngine.InputSystem;
 ///  - click a unit of your own faction to select it, click it again to deselect it;
 ///  - Tab selects the next of your units that still has action points;
 ///  - with a unit selected, click a tile to send the unit there;
-///  - right click: the selected unit turns its field of view towards the cursor.
-/// Units of other factions cannot be selected or given orders, clicking them does nothing.
+///  - right click: the selected unit turns its field of view towards the cursor (it costs Unit.TurnCost action points).
+/// Units of other factions cannot be selected or given orders; clicking an enemy that the selected unit can see goes to the shot view at
+/// that enemy (see ShotCamera).
 /// Clicks on UI (for example the End Turn button) are ignored.
 /// </summary>
 public class UnitSelector : MonoBehaviour
 {
     [SerializeField] private Camera targetCamera;
-    [SerializeField] private LayerMask raycastMask = ~0;
+    [SerializeField] private LayerMask raycastMask = Physics.DefaultRaycastLayers;   // everything except 'Ignore Raycast'
 
     [Tooltip("Only units of this faction can be selected and given orders.")]
     [SerializeField] private Faction controlledFaction = Faction.Player;
@@ -60,6 +61,20 @@ public class UnitSelector : MonoBehaviour
 
     private void Update()
     {
+        // the selected unit has died: somebody else takes over
+        if (selectedUnit != null && !selectedUnit.IsAlive)
+        {
+            Deselect();
+            SelectNextAvailable();
+        }
+
+        // the enemy is acting: no orders
+        if (!TurnManager.IsPlayersTurnNow)
+            return;
+
+        if (ShotCamera.Active)
+            return;                 // looking through the shooter's eyes: no orders, no turning, no Tab
+
         if (TabPressed())
             SelectNextAvailable();
 
@@ -88,7 +103,7 @@ public class UnitSelector : MonoBehaviour
             return;
         }
 
-        Tile tile = hit.collider.GetComponentInParent<Tile>();
+        Tile tile = Tile.FromCollider(hit.collider);       // a free tile, or the roof of a building
         if (tile != null && selectedUnit != null)
             selectedUnit.MoveTo(tile);
     }
@@ -96,7 +111,7 @@ public class UnitSelector : MonoBehaviour
     /// <summary>Selects the unit (and deselects the previous one). Only units of the controlled faction can be selected.</summary>
     public bool Select(Unit unit)
     {
-        if (unit == null || unit.Faction != controlledFaction)
+        if (unit == null || unit.Faction != controlledFaction || !unit.IsAlive)
             return false;
 
         if (unit == selectedUnit)
@@ -150,7 +165,7 @@ public class UnitSelector : MonoBehaviour
         List<Unit> result = new List<Unit>();
         foreach (Unit u in Unit.All)
         {
-            if (u != null && u.Faction == controlledFaction)
+            if (u != null && u.Faction == controlledFaction && u.IsAlive)
                 result.Add(u);
         }
 
@@ -159,9 +174,14 @@ public class UnitSelector : MonoBehaviour
 
     private void HandleUnitClick(Unit unit)
     {
-        // Not ours: it can neither be selected nor change the current selection.
+        // Not ours: it cannot be selected. Clicking an enemy that the selected unit can see goes to the shot view at it.
         if (unit.Faction != controlledFaction)
+        {
+            ShotCamera shotCamera = FindFirstObjectByType<ShotCamera>();
+            if (shotCamera != null && selectedUnit != null)
+                shotCamera.TryBegin(selectedUnit, unit);
             return;
+        }
 
         if (unit == selectedUnit)
             Deselect();
@@ -189,7 +209,7 @@ public class UnitSelector : MonoBehaviour
         if (!ground.Raycast(ray, out float distance))
             return;
 
-        selectedUnit.LookAt(ray.GetPoint(distance));
+        selectedUnit.TurnTo(ray.GetPoint(distance));           // costs action points; nothing happens without them
     }
 
     private static bool TryGetRightClick(out Vector2 screenPos)

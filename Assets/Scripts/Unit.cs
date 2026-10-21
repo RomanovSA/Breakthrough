@@ -6,7 +6,7 @@ using UnityEngine;
 /// along a route that goes around walls.
 ///
 /// Action points: for cost purposes the unit cannot move diagonally, so every tile of the route costs
-/// 1 point. While running it still cuts corners diagonally when that is possible; such a diagonal hop
+/// 1 point (a ladder costs the field's ladder cost). While running it still cuts corners diagonally when that is possible; such a diagonal hop
 /// is charged as the 2 steps it replaces. With 0 action points the unit cannot move.
 /// </summary>
 public class Unit : MonoBehaviour
@@ -31,6 +31,20 @@ public class Unit : MonoBehaviour
     [SerializeField, Range(1f, 360f)] private float viewAngle = 30f;
     [Tooltip("How far the unit sees, in tiles.")]
     [SerializeField, Min(0f)] private float viewRange = 5f;
+
+    [Header("Shooting")]
+    [Tooltip("How well the unit aims: the half-angle (in degrees) of the cone its bullets land in. The spread ring in the shot view is distance x tan(this) wide. Smaller = more accurate.")]
+    [SerializeField, Range(0.1f, 20f)] private float aimSpread = 3f;
+    [Tooltip("How much health a bullet of this unit takes away from whatever it hits.")]
+    [SerializeField, Min(1)] private int weaponDamage = 30;
+    [Tooltip("The end of the barrel: bullets start here. (An empty object on the weapon.)")]
+    [SerializeField] private Transform muzzle;
+    [Tooltip("Action points one shot costs.")]
+    [SerializeField, Min(0)] private int shotCost = 2;
+    [Tooltip("Action points it costs to turn towards the mouse (right click).")]
+    [SerializeField, Min(0)] private int turnCost = 1;
+    [Tooltip("Action points it costs to crouch, and the same to stand up again.")]
+    [SerializeField, Min(0)] private int stanceCost = 1;
     [Tooltip("The part of the unit that turns (the Model object). Its forward direction is where the unit looks.")]
     [SerializeField] private Transform facing;
     [Tooltip("Switched off while the selected unit cannot see this unit (its health bar and vision fan).")]
@@ -55,6 +69,12 @@ public class Unit : MonoBehaviour
 
     /// <summary>Goes up every time some unit appears, disappears, takes a tile or leaves one.</summary>
     public static int OccupancyVersion { get; private set; }
+
+    /// <summary>Something on the field changed (an obstacle broke): maps that depend on it (reach, cover) look again.</summary>
+    public static void NotifyMapChanged()
+    {
+        OccupancyVersion++;
+    }
 
     /// <summary>Coordinates of every tile that is taken by a unit other than 'exclude'.</summary>
     public static HashSet<Vector2Int> GetOccupiedCoords(Unit exclude)
@@ -102,6 +122,7 @@ public class Unit : MonoBehaviour
     private Tile stepTarget;    // tile the unit is running to right now (null when idle)
     private Vector3 stepPosition;
     private readonly Queue<Tile> waypoints = new Queue<Tile>();
+    private readonly Queue<Vector3> detour = new Queue<Vector3>();   // extra points to pass before the tile itself (the rungs of a ladder)
 
     /// <summary>Action points left in the current turn.</summary>
     public int ActionPoints => actionPoints;
@@ -117,11 +138,111 @@ public class Unit : MonoBehaviour
 
     public bool IsAlive => health > 0;
 
+    /// <summary>The squad this unit belongs to (null for a unit that is not in one). UnitSpawner sets it.</summary>
+    public EnemyGroup Group { get; set; }
+
+    /// <summary>Raised once, when the unit's health runs out.</summary>
+    public event System.Action<Unit> Died;
+
+    private bool dead;
+    private Vector3 lastHitDirection;
+
     /// <summary>Raised whenever the unit's health changes (damage or healing).</summary>
     public event System.Action<Unit> HealthChanged;
 
     /// <summary>The side this unit fights for.</summary>
     public Faction Faction => faction;
+
+    /// <summary>Half-angle (degrees) of the cone the bullets of this unit land in; smaller = a better shot.</summary>
+    public float AimSpread => aimSpread;
+
+    /// <summary>Health that a bullet of this unit takes away.</summary>
+    public int WeaponDamage => weaponDamage;
+
+    /// <summary>Action points one shot costs.</summary>
+    public int ShotCost => shotCost;
+
+    /// <summary>Action points a turn on the spot (TurnTo) costs.</summary>
+    public int TurnCost => turnCost;
+
+    /// <summary>Action points crouching costs, and standing up again.</summary>
+    public int StanceCost => stanceCost;
+
+    private UnitStance stance;
+
+    /// <summary>True while the unit is crouching (or going down).</summary>
+    public bool IsCrouched
+    {
+        get
+        {
+            if (stance == null)
+                stance = GetComponent<UnitStance>();
+            return stance != null && stance.Crouched;
+        }
+    }
+
+    /// <summary>How much lower the unit's chest is than when standing, right now (0 when standing): the ring of spread and the camera follow it.</summary>
+    public float StanceChestDrop
+    {
+        get
+        {
+            if (stance == null)
+                stance = GetComponent<UnitStance>();
+            return stance != null ? stance.ChestDrop : 0f;
+        }
+    }
+
+    /// <summary>True if the unit may change its stance now: it is alive, not moving, and has the points.</summary>
+    public bool CanChangeStance => !dead && !IsMoving && actionPoints >= stanceCost;
+
+    /// <summary>
+    /// Crouches a standing unit, stands up a crouching one; costs StanceCost action points. Nothing happens (false) when the unit is
+    /// moving, dead, or has too few points.
+    /// </summary>
+    public bool ToggleStance()
+    {
+        if (!CanChangeStance)
+            return false;
+
+        if (stance == null)
+            stance = GetComponent<UnitStance>();
+        if (stance == null)
+            stance = gameObject.AddComponent<UnitStance>();
+
+        stance.SetCrouched(!stance.Crouched);
+        actionPoints -= stanceCost;
+        return true;
+    }
+
+    /// <summary>A turn by less than this many degrees is no turn: nothing happens and nothing is paid.</summary>
+    public const float MinTurnAngle = 3f;
+
+    /// <summary>True if there are enough action points left for one shot.</summary>
+    public bool CanAffordShot => IsAlive && actionPoints >= shotCost;
+
+    /// <summary>Takes the action points away if there are enough of them; otherwise does nothing and returns false.</summary>
+    public bool TrySpendActionPoints(int amount)
+    {
+        if (amount < 0 || actionPoints < amount)
+            return false;
+
+        actionPoints -= amount;
+        return true;
+    }
+
+    /// <summary>Where bullets leave the weapon: the end of the barrel (a point in front of the chest if the weapon has no muzzle marker).</summary>
+    /// <summary>The object that is the body of the unit (it turns with the unit and carries the weapon).</summary>
+    public Transform Model => facing != null ? facing : transform;
+
+    public Vector3 MuzzlePosition
+    {
+        get
+        {
+            if (muzzle != null)
+                return muzzle.position;
+            return transform.position + Vector3.up * 0.95f + FacingDirection * 0.55f;
+        }
+    }
 
     /// <summary>Width of the field of view in degrees.</summary>
     public float ViewAngle => viewAngle;
@@ -169,6 +290,9 @@ public class Unit : MonoBehaviour
     // That way two units can never be on one tile, and never plan to be.
     private void AddOccupiedCoords(HashSet<Vector2Int> set)
     {
+        if (dead)
+            return;                 // a body does not take a tile
+
         set.Add(currentTile != null ? currentTile.Coords : coords);
 
         if (stepTarget != null)
@@ -183,10 +307,20 @@ public class Unit : MonoBehaviour
 
     private void Update()
     {
+        if (dead)
+            return;
+
         Tick(Time.deltaTime);
     }
 
     /// <summary>Reduces the unit's health by the given amount (never below 0).</summary>
+    /// <summary>Same, and the unit knows which way the hit came (a unit that dies falls that way).</summary>
+    public void TakeDamage(int amount, Vector3 hitDirection)
+    {
+        lastHitDirection = hitDirection;
+        TakeDamage(amount);
+    }
+
     public void TakeDamage(int amount)
     {
         if (amount <= 0)
@@ -206,12 +340,71 @@ public class Unit : MonoBehaviour
 
     private void SetHealth(int value)
     {
+        if (dead)
+            return;                 // the dead stay dead
+
         value = Mathf.Clamp(value, 0, maxHealth);
         if (value == health)
             return;
 
         health = value;
         HealthChanged?.Invoke(this);
+
+        if (health <= 0)
+            Die();
+    }
+
+    // The unit has no health left: it stops, falls over and stays lying. It no longer takes a tile, cannot be selected, hit, or sent anywhere.
+    private void Die()
+    {
+        dead = true;
+
+        UnitStance crouching = GetComponent<UnitStance>();
+        if (crouching != null)
+            crouching.enabled = false;      // the pose stays as it was; the body falls from it
+
+        UnitPeek leaning = GetComponent<UnitPeek>();
+        if (leaning != null)
+        {
+            leaning.Snap();                 // back in place before it falls
+            if (Application.isPlaying) Destroy(leaning); else DestroyImmediate(leaning);
+        }
+
+        stepTarget = null;
+        waypoints.Clear();
+        detour.Clear();
+
+        isSelected = false;
+        RefreshVisuals();
+
+        foreach (Collider c in GetComponentsInChildren<Collider>())
+            c.enabled = false;
+
+        if (hiddenWhileUnseen != null)
+        {
+            foreach (GameObject go in hiddenWhileUnseen)
+            {
+                if (go != null)
+                    go.SetActive(false);        // no health bar, no field of view
+            }
+        }
+
+        // the pose is frozen where it is, then the body falls
+        foreach (Animator a in GetComponentsInChildren<Animator>())
+            a.enabled = false;
+        foreach (UnitWeaponIK ik in GetComponentsInChildren<UnitWeaponIK>())
+            ik.enabled = false;
+        foreach (UnitAnimator ua in GetComponentsInChildren<UnitAnimator>())
+            ua.enabled = false;
+
+        Transform model = facing != null ? facing : transform;
+        UnitCorpse corpse = GetComponent<UnitCorpse>();
+        if (corpse == null)
+            corpse = gameObject.AddComponent<UnitCorpse>();
+        corpse.Begin(model, lastHitDirection.sqrMagnitude > 1e-6f ? lastHitDirection : -model.forward);
+
+        NotifyOccupancyChanged();
+        Died?.Invoke(this);
     }
 
     // Handy for trying the health bars out: right-click the Unit component header.
@@ -243,6 +436,14 @@ public class Unit : MonoBehaviour
         if ((transform.position - stepPosition).sqrMagnitude < 0.000001f)
         {
             transform.position = stepPosition;
+
+            // on a ladder: first the foot of the rungs, then the top, then the tile itself
+            if (detour.Count > 0)
+            {
+                stepPosition = detour.Dequeue();
+                return;
+            }
+
             currentTile = stepTarget;
             coords = currentTile.Coords;
             NotifyOccupancyChanged();
@@ -262,12 +463,32 @@ public class Unit : MonoBehaviour
 
         stepTarget = waypoints.Dequeue();
         stepPosition = GetPositionOn(stepTarget);
+        detour.Clear();
 
         int cost = 1;
         if (currentTile != null)
         {
-            Vector2Int delta = stepTarget.Coords - currentTile.Coords;
-            cost = Mathf.Abs(delta.x) + Mathf.Abs(delta.y);
+            GridManager grid = stepTarget.GetComponentInParent<GridManager>();
+            Ladder ladder = grid != null ? grid.GetLadder(currentTile, stepTarget) : null;
+            if (grid != null)
+            {
+                cost = grid.StepCost(currentTile.Coords, stepTarget.Coords);
+            }
+            else
+            {
+                Vector2Int delta = stepTarget.Coords - currentTile.Coords;
+                cost = Mathf.Abs(delta.x) + Mathf.Abs(delta.y);
+            }
+
+            if (ladder != null)
+            {
+                // climb: to the foot of the rungs, up (or down) the ladder, then onto the tile
+                Vector3 arrival = stepPosition;
+                bool up = ladder.roof == stepTarget;
+                stepPosition = up ? ladder.climbBottom : ladder.climbTop;
+                detour.Enqueue(up ? ladder.climbTop : ladder.climbBottom);
+                detour.Enqueue(arrival);
+            }
         }
 
         actionPoints = Mathf.Max(0, actionPoints - cost);
@@ -283,6 +504,7 @@ public class Unit : MonoBehaviour
             return false;
 
         waypoints.Clear();
+        detour.Clear();
         stepTarget = null;
         currentTile = tile;
         coords = tile.Coords;
@@ -293,10 +515,12 @@ public class Unit : MonoBehaviour
 
     /// <summary>
     /// Sends the unit towards the given tile, walking around walls and around other units.
-    /// Every tile of the route costs 1 action point, so with too few points the unit runs as far as its
-    /// points allow and stops.
-    /// Returns false (and does nothing) if the unit is already moving, has no action points, is already
-    /// standing on that tile, the tile is taken by another unit, or it cannot be reached.
+    /// Every tile of the route costs 1 action point, climbing a ladder (to a roof or back down) costs the ladder cost of
+    /// the field (GridManager, 1 by default). A tile that is farther than the unit has points for
+    /// (outside the area it can reach this turn) is refused: the unit does not move at all.
+    /// Returns false (and does nothing) if the unit is already moving, has no action points, the tile is farther
+    /// than its points allow, it is already standing on that tile, the tile is taken by another unit or a building,
+    /// or it cannot be reached.
     /// </summary>
     public bool MoveTo(Tile destination)
     {
@@ -304,7 +528,7 @@ public class Unit : MonoBehaviour
         if (IsMoving)
             return false;
 
-        if (destination == null || actionPoints <= 0)
+        if (dead || destination == null || actionPoints <= 0)
             return false;
 
         GridManager grid = destination.GetComponentInParent<GridManager>();
@@ -322,14 +546,14 @@ public class Unit : MonoBehaviour
         if (path == null)
             return false;
 
-        int cost = path.Count - 1;
-        if (cost == 0)
+        if (path.Count < 2)
             return false; // already standing there
 
-        // Not enough points for the whole route: keep only the part we can pay for.
-        int steps = Mathf.Min(cost, actionPoints);
-        if (steps < cost)
-            path.RemoveRange(steps + 1, path.Count - (steps + 1));
+        int cost = grid.PathCost(path);
+
+        // Outside the reachable area: not enough points for the whole route, so no move at all.
+        if (cost > actionPoints)
+            return false;
 
         // Cut corners where possible. The total cost stays the same.
         List<Tile> route = Pathfinder.SmoothPath(grid, path);
@@ -346,6 +570,9 @@ public class Unit : MonoBehaviour
     // The unit's pivot is at its feet, so it simply stands on the top face of the tile.
     private Vector3 GetPositionOn(Tile tile)
     {
+        if (tile.HasRoof)
+            return new Vector3(tile.transform.position.x, tile.RoofY, tile.transform.position.z);      // standing on the roof
+
         Renderer tileRenderer = tile.GetComponent<Renderer>();
         Vector3 tilePos = tile.transform.position;
         float tileTop = tileRenderer != null ? tileRenderer.bounds.max.y : tilePos.y;
@@ -455,7 +682,7 @@ public class Unit : MonoBehaviour
             foreach (GameObject go in hiddenWhileUnseen)
             {
                 if (go != null)
-                    go.SetActive(!fogged);
+                    go.SetActive(!fogged && !dead && !concealed);
             }
         }
     }
@@ -466,7 +693,7 @@ public class Unit : MonoBehaviour
     /// </summary>
     public bool LookAt(Vector3 worldPoint)
     {
-        if (IsMoving)
+        if (dead || IsMoving)
             return false;
 
         Vector3 d = worldPoint - transform.position;
@@ -480,6 +707,94 @@ public class Unit : MonoBehaviour
 
         turner.LookAt(worldPoint);
         return true;
+    }
+
+    /// <summary>
+    /// The turn the player orders (right click): like LookAt, but it costs TurnCost action points. Nothing is turned and nothing
+    /// is paid when the unit is dead or moving, has too few points left, when the point is right where the unit stands, or when the
+    /// unit already looks that way (less than MinTurnAngle degrees to turn). Returns whether the unit turned.
+    /// </summary>
+    public bool TurnTo(Vector3 worldPoint)
+    {
+        if (dead || IsMoving || actionPoints < turnCost)
+            return false;
+
+        Vector3 d = worldPoint - transform.position;
+        d.y = 0f;
+        if (d.sqrMagnitude < 0.0225f)
+            return false;
+
+        Vector3 now = FacingDirection;
+        now.y = 0f;
+        if (now.sqrMagnitude > 1e-6f && Vector3.Angle(now, d) < MinTurnAngle)
+            return false;
+
+        if (!LookAt(worldPoint))
+            return false;
+
+        actionPoints -= turnCost;
+        return true;
+    }
+
+    /// <summary>True while the unit is hidden: not drawn at all (see EnemyVisibility).</summary>
+    public bool IsConcealed => concealed;
+
+    private bool concealed;
+    private Renderer[] bodyRenderers;
+
+    /// <summary>
+    /// Hides the unit (or shows it again): its body, weapon and shadow are not drawn, and neither are its health bar and vision fan.
+    /// Nothing else changes: the unit keeps its tile, bullets still hit it, it keeps moving and acting.
+    /// </summary>
+    public void SetConcealed(bool value)
+    {
+        if (value == concealed && bodyRenderers != null)
+            return;
+
+        concealed = value;
+        if (bodyRenderers == null)
+            CacheBodyRenderers();
+
+        foreach (Renderer r in bodyRenderers)
+        {
+            if (r != null)
+                r.enabled = !value;
+        }
+
+        // the health bar and the vision fan are switched by whole objects (the fog does it too, see SetFogged)
+        if (hiddenWhileUnseen != null)
+        {
+            foreach (GameObject go in hiddenWhileUnseen)
+            {
+                if (go != null)
+                    go.SetActive(!isFogged && !dead && !concealed);
+            }
+        }
+    }
+
+    // The renderers of the body and weapon: not the ones of the health bar and the fan, which are switched as objects.
+    private void CacheBodyRenderers()
+    {
+        List<Renderer> list = new List<Renderer>();
+        foreach (Renderer r in GetComponentsInChildren<Renderer>(true))
+        {
+            if (r.GetComponent<UnitVisionDisplay>() != null)
+                continue;
+
+            bool underSwitchedObject = false;
+            if (hiddenWhileUnseen != null)
+            {
+                foreach (GameObject go in hiddenWhileUnseen)
+                {
+                    if (go != null && r.transform.IsChildOf(go.transform))
+                        underSwitchedObject = true;
+                }
+            }
+
+            if (!underSwitchedObject)
+                list.Add(r);
+        }
+        bodyRenderers = list.ToArray();
     }
 
     public void ToggleSelected()

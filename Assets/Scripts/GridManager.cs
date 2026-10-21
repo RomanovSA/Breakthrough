@@ -20,10 +20,25 @@ public class GridManager : MonoBehaviour
 {
     private const string TilesRootName = "Tiles";
     private const string WallsRootName = "Walls";
+    private const string ObjectsRootName = "Objects";
+    private const string OverlayRootName = "Overlay";
+    private const int IgnoreRaycastLayer = 2;     // Unity's built-in 'Ignore Raycast' layer
 
     [Header("Prefabs")]
     [SerializeField] private Tile tilePrefab;
     [SerializeField] private GameObject wallPrefab;
+    [Tooltip("Material of the tile marks (hover, reachable, in the dark). Needs a transparent shader that uses vertex colours, e.g. Sprites/Default.")]
+    [SerializeField] private Material overlayMaterial;
+
+    [Header("Cover")]
+    [Tooltip("A solid thing at least this tall (above the ground, world units) is half cover: a unit behind it is covered when crouching.")]
+    [SerializeField, Min(0f)] private float halfCoverMinHeight = 0.4f;
+    [Tooltip("A solid thing at least this tall is full cover (units are 1 tall; a van is about 1.4, a sedan 0.8, a bus stop 1.2).")]
+    [SerializeField, Min(0f)] private float fullCoverMinHeight = 1.3f;
+
+    [Header("Ladders")]
+    [Tooltip("Action points a unit spends to climb a ladder, up to a roof or down to the ground.")]
+    [SerializeField, Min(1)] private int ladderCost = 1;
 
     [Header("Field")]
     [Tooltip("Used when no Settings Provider is assigned.")]
@@ -33,6 +48,7 @@ public class GridManager : MonoBehaviour
     [SerializeField] private bool buildOnStart = true;
 
     private Tile[,] map;
+    private readonly Dictionary<Tile, Ladder> ladderByTile = new Dictionary<Tile, Ladder>();   // a ladder is stored under both of its ends
     private List<Tile> tileList;
     private List<Wall> wallList;
 
@@ -89,6 +105,8 @@ public class GridManager : MonoBehaviour
 
         Transform tilesRoot = CreateRoot(TilesRootName);
         Transform wallsRoot = CreateRoot(WallsRootName);
+        Transform objectsRoot = CreateRoot(ObjectsRootName);
+        Transform overlayRoot = CreateRoot(OverlayRootName);
 
         for (int x = 0; x < width; x++)
         {
@@ -97,6 +115,7 @@ public class GridManager : MonoBehaviour
                 Tile tile = SpawnTile(tilesRoot);
                 tile.transform.localPosition = new Vector3(x * tileSize, 0f, y * tileSize);
                 tile.Init(new Vector2Int(x, y));
+                tile.SetLabelVisible(settings.showCoordinates);
             }
         }
 
@@ -122,6 +141,8 @@ public class GridManager : MonoBehaviour
             }
         }
 
+        SpawnObjects(settings.objects, objectsRoot, tileSize);
+        BuildOverlay(overlayRoot, settings.overlayHeight);
         wallList = null;
         CurrentSettings = settings;
         GridBuilt?.Invoke();
@@ -149,6 +170,7 @@ public class GridManager : MonoBehaviour
         tileList = null;
         wallList = null;
         CurrentSettings = null;
+        ladderByTile.Clear();
     }
 
     /// <summary>Returns the tile with the given coordinates, or null if there is none.</summary>
@@ -196,10 +218,33 @@ public class GridManager : MonoBehaviour
     /// </summary>
     public bool CanStep(Vector2Int from, Vector2Int to)
     {
-        if (GetTile(from) == null || GetTile(to) == null)
+        Tile fromTile = GetTile(from);
+        Tile toTile = GetTile(to);
+        if (fromTile == null || toTile == null)
             return false;
 
         Vector2Int d = to - from;
+        bool sideways = Mathf.Abs(d.x) + Mathf.Abs(d.y) == 1;
+
+        if (fromTile.HasRoof || toTile.HasRoof)
+        {
+            // On a roof a unit walks freely over the roof tiles. Between a roof and the ground there is only a ladder.
+            if (!(fromTile.HasRoof && toTile.HasRoof))
+                return sideways && GetLadder(fromTile, toTile) != null;
+
+            if (sideways)
+                return true;
+            if (Mathf.Abs(d.x) == 1 && Mathf.Abs(d.y) == 1)
+            {
+                Vector2Int roofViaX = new Vector2Int(to.x, from.y);
+                Vector2Int roofViaY = new Vector2Int(from.x, to.y);
+                return CanStep(from, roofViaX) && CanStep(roofViaX, to) && CanStep(from, roofViaY) && CanStep(roofViaY, to);
+            }
+            return false;
+        }
+
+        if (fromTile.IsBlocked || toTile.IsBlocked)
+            return false;
 
         if (Mathf.Abs(d.x) + Mathf.Abs(d.y) == 1)
             return !IsEdgeBlocked(from, to);
@@ -212,6 +257,55 @@ public class GridManager : MonoBehaviour
         }
 
         return false;
+    }
+
+    /// <summary>Action points a unit spends to climb a ladder (up or down).</summary>
+    public int LadderCost => ladderCost;
+
+    /// <summary>The ladder that links these two tiles (a ground tile and the roof tile next to it), or null.</summary>
+    public Ladder GetLadder(Tile a, Tile b)
+    {
+        Ladder ladder;
+        if (a != null && b != null && ladderByTile.TryGetValue(a, out ladder)
+            && ((ladder.foot == a && ladder.roof == b) || (ladder.roof == a && ladder.foot == b)))
+            return ladder;
+        return null;
+    }
+
+    /// <summary>All the ladders of the field.</summary>
+    public IEnumerable<Ladder> Ladders
+    {
+        get
+        {
+            HashSet<Ladder> seen = new HashSet<Ladder>();
+            foreach (Ladder l in ladderByTile.Values)
+                if (seen.Add(l))
+                    yield return l;
+        }
+    }
+
+    /// <summary>
+    /// What one hop between two neighbouring route tiles costs: climbing a ladder costs LadderCost, a straight step
+    /// 1, a diagonal hop 2 (the two straight steps it replaces).
+    /// </summary>
+    public int StepCost(Vector2Int a, Vector2Int b)
+    {
+        Tile ta = GetTile(a);
+        Tile tb = GetTile(b);
+        if (ta != null && tb != null && GetLadder(ta, tb) != null)
+            return ladderCost;
+
+        Vector2Int d = b - a;
+        return Mathf.Abs(d.x) + Mathf.Abs(d.y);
+    }
+
+    /// <summary>What a whole route costs in action points.</summary>
+    public int PathCost(List<Tile> route)
+    {
+        int cost = 0;
+        for (int i = 1; i < route.Count; i++)
+            cost += StepCost(route[i - 1].Coords, route[i].Coords);
+        return cost;
     }
 
     /// <summary>Distance between the centres of two neighbouring tiles, in world units.</summary>
@@ -277,12 +371,136 @@ public class GridManager : MonoBehaviour
             if (IsEdgeBlocked(current, next))
                 return t * s;                       // a wall
 
+            Tile nextTile = GetTile(next);
+            if (nextTile != null && nextTile.BlocksSight && nextTile.BlockTopY > origin.y + 0.3f)
+                return t * s;                       // a building (but not one lower than the viewer: from a roof you see over it)
+
             i = next.x;
             j = next.y;
             if (crossX) tMaxX += tDeltaX; else tMaxY += tDeltaY;
         }
 
         return maxDistance;
+    }
+
+    /// <summary>
+    /// The biggest set of free tiles that are connected to each other (walls, buildings and cars respected).
+    /// Anything outside it is a pocket that can not be reached from the main part of the field.
+    /// </summary>
+    public HashSet<Vector2Int> GetLargestFreeRegion()
+    {
+        Vector2Int size = Size;
+        HashSet<Vector2Int> best = new HashSet<Vector2Int>();
+        bool[,] seen = new bool[size.x, size.y];
+        Vector2Int[] steps = { Vector2Int.right, Vector2Int.left, Vector2Int.up, Vector2Int.down };
+
+        for (int x = 0; x < size.x; x++)
+        {
+            for (int y = 0; y < size.y; y++)
+            {
+                Tile start = GetTile(new Vector2Int(x, y));
+                if (seen[x, y] || start == null || start.IsBlocked)
+                    continue;
+
+                HashSet<Vector2Int> region = new HashSet<Vector2Int>();
+                Queue<Vector2Int> queue = new Queue<Vector2Int>();
+                queue.Enqueue(start.Coords);
+                seen[x, y] = true;
+
+                while (queue.Count > 0)
+                {
+                    Vector2Int c = queue.Dequeue();
+                    region.Add(c);
+                    foreach (Vector2Int d in steps)
+                    {
+                        Vector2Int n = c + d;
+                        if (n.x < 0 || n.y < 0 || n.x >= size.x || n.y >= size.y || seen[n.x, n.y] || !CanStep(c, n))
+                            continue;
+
+                        seen[n.x, n.y] = true;
+                        queue.Enqueue(n);
+                    }
+                }
+
+                if (region.Count > best.Count)
+                    best = region;
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>The four directions, in the order north (+y), east (+x), south, west. Used for cover.</summary>
+    public static readonly Vector2Int[] Directions = { Vector2Int.up, Vector2Int.right, Vector2Int.down, Vector2Int.left };
+
+    /// <summary>
+    /// The cover a unit standing on this tile has against the given direction (0 north, 1 east, 2 south, 3 west): a wall
+    /// on the edge is full cover, and so is whatever stands on the next tile if it is tall enough (half cover if it is low).
+    /// </summary>
+    public CoverType GetCover(Vector2Int tile, int direction)
+    {
+        Vector2Int next = tile + Directions[direction];
+        Tile from = GetTile(tile);
+        Tile to = GetTile(next);
+        CoverType best = CoverType.None;
+
+        if (from != null && from.IsBlocked)
+            return CoverType.None;                  // nobody stands on a blocked ground tile; on a roof there is no cover
+
+        if (from != null && to != null && IsEdgeBlocked(tile, next))
+            best = CoverType.Full;
+
+        if (to != null && to.IsBlocked && to.ProvidesCover > best)
+            best = to.ProvidesCover;
+
+        return best;
+    }
+
+    /// <summary>The best cover the tile has in any direction.</summary>
+    public CoverType GetBestCover(Vector2Int tile)
+    {
+        CoverType best = CoverType.None;
+        for (int d = 0; d < 4; d++)
+            best = (CoverType)Mathf.Max((int)best, (int)GetCover(tile, d));
+        return best;
+    }
+
+    private readonly HashSet<Vector2Int> seeScratch = new HashSet<Vector2Int>();
+
+    /// <summary>
+    /// True when the target stands on a tile inside the viewer's field of view (its position, facing, view angle and range,
+    /// with buildings and walls blocking the view): the same field that is drawn as the vision fan.
+    /// </summary>
+    public bool CanSee(Unit viewer, Unit target)
+    {
+        if (viewer == null || target == null)
+            return false;
+
+        ComputeVisibleTiles(viewer.transform.position, viewer.FacingDirection, viewer.ViewAngle, viewer.ViewRange, seeScratch);
+        return seeScratch.Contains(target.Coords);
+    }
+
+    private TileOverlay overlay;
+
+    /// <summary>The layer above the ground where tile marks (hover, reachable, in the dark) are drawn.</summary>
+    public TileOverlay Overlay
+    {
+        get
+        {
+            if (overlay == null)
+                overlay = GetComponentInChildren<TileOverlay>();
+            return overlay;
+        }
+    }
+
+    /// <summary>How far above the top of the tiles the tile marks are drawn (world units).</summary>
+    public float OverlayHeight => Overlay != null ? Overlay.Height : 0.02f;
+
+    private void BuildOverlay(Transform root, float height)
+    {
+        overlay = root.gameObject.AddComponent<TileOverlay>();
+        overlay.Configure(overlayMaterial, height);
+        overlay.Rebuild();
     }
 
     /// <summary>All the tiles of the field.</summary>
@@ -366,6 +584,278 @@ public class GridManager : MonoBehaviour
             return false;
 
         return VisibleDistance(origin, d, dist) >= dist - 0.001f;   // nothing in the way
+    }
+
+    // Puts the objects of the settings on the field (buildings, props, vehicles...).
+    private void SpawnObjects(List<GridObject> objects, Transform parent, float tileSize)
+    {
+        if (objects == null || objects.Count == 0)
+            return;
+
+        Tile origin = GetTile(Vector2Int.zero);
+        if (origin == null)
+            return;
+
+        Renderer originRenderer = origin.GetComponent<Renderer>();
+        float top = originRenderer != null ? originRenderer.bounds.max.y : origin.transform.position.y;
+
+        List<PendingLadder> pendingLadders = new List<PendingLadder>();
+
+        foreach (GridObject o in objects)
+        {
+            if (o.prefab == null)
+                continue;
+
+            GameObject go = InstantiateObject(o.prefab, parent);
+            Vector3 position = origin.transform.position + new Vector3(o.position.x * tileSize, 0f, o.position.y * tileSize);
+            position.y = top + o.height;
+
+            go.name = o.prefab.name;
+            go.transform.SetPositionAndRotation(position, Quaternion.Euler(0f, o.yaw, 0f));
+            float objectScale = o.scale > 0f ? o.scale : 1f;
+            go.transform.localScale = new Vector3(objectScale * (o.stretchX > 0f ? o.stretchX : 1f), objectScale, objectScale * (o.stretchZ > 0f ? o.stretchZ : 1f));
+
+            // solid things (buildings) block the tiles under them; everything else is ignored by mouse clicks,
+            // so a click goes through a car or a road piece to the tile below
+            if (o.solid)
+            {
+                List<Tile> covered = BlockTilesUnder(go, tileSize, o.blocksSight, o.singleTile, o.providesCover ? MeasureCover(go, top) : CoverType.None);
+                MakeShootable(go, covered, o);
+                if (covered != null && FindMarker(go, "LadderFoot") != null)
+                    pendingLadders.Add(new PendingLadder { go = go, tiles = covered });
+                if (o.singleTile)
+                    SetLayerRecursively(go, IgnoreRaycastLayer);      // a click goes through it to the (blocked) tile under it
+            }
+            else
+                SetLayerRecursively(go, IgnoreRaycastLayer);
+        }
+
+        FinalizeLadders(pendingLadders, tileSize, top);
+    }
+
+    // Marks as blocked every tile that the object covers noticeably (seen from above: at least a third of the tile is
+    // under it). The tile in the middle of the object is always blocked, so even a small thing blocks something.
+    // The tiles also block the view when the object is tall.
+    // How good the cover is that an object gives, from how far it sticks out above the ground.
+    private CoverType MeasureCover(GameObject go, float groundTop)
+    {
+        Renderer[] renderers = go.GetComponentsInChildren<Renderer>();
+        if (renderers.Length == 0)
+            return CoverType.None;
+
+        float topY = renderers[0].bounds.max.y;
+        foreach (Renderer r in renderers)
+            topY = Mathf.Max(topY, r.bounds.max.y);
+
+        float h = topY - groundTop;
+        return h >= fullCoverMinHeight ? CoverType.Full : h >= halfCoverMinHeight ? CoverType.Half : CoverType.None;
+    }
+
+    // A solid thing can be shot: it gets colliders (a bullet is a real body) and health. Things that came without a collider
+    // get one in the shape of their mesh.
+    private static void MakeShootable(GameObject go, List<Tile> blocked, GridObject o)
+    {
+        foreach (MeshFilter filter in go.GetComponentsInChildren<MeshFilter>(true))
+        {
+            if (filter.sharedMesh == null || filter.GetComponent<Collider>() != null)
+                continue;
+
+            MeshCollider collider = filter.gameObject.AddComponent<MeshCollider>();
+            collider.sharedMesh = filter.sharedMesh;
+            // on the 'Ignore Raycast' layer: bullets hit it, the mouse (a Physics.Raycast) passes through it like before,
+            // so clicking a tile behind or on top of a building still works
+            filter.gameObject.layer = IgnoreRaycastLayer;
+        }
+
+        Destructible thing = go.GetComponent<Destructible>();
+        if (thing == null)
+            thing = go.AddComponent<Destructible>();
+        thing.Setup(o.health > 0 ? o.health : 100, o.breakable, blocked);
+    }
+
+    private class PendingLadder
+    {
+        public GameObject go;
+        public List<Tile> tiles;
+    }
+
+    private static Transform FindMarker(GameObject go, string namePrefix)
+    {
+        foreach (Transform t in go.GetComponentsInChildren<Transform>(true))
+            if (t.name.StartsWith(namePrefix))
+                return t;
+        return null;
+    }
+
+    private List<Tile> BlockTilesUnder(GameObject go, float tileSize, bool blocksSight, bool ownTileOnly, CoverType cover)
+    {
+        Renderer[] renderers = go.GetComponentsInChildren<Renderer>();
+        Tile origin = GetTile(Vector2Int.zero);
+        if (renderers.Length == 0 || origin == null)
+            return null;
+
+        Bounds b = renderers[0].bounds;
+        foreach (Renderer r in renderers)
+            b.Encapsulate(r.bounds);
+
+        // a small thing (palm, bin, pole): only the tile it stands on, however wide its leaves are
+        if (ownTileOnly)
+        {
+            Vector3 offset = go.transform.position - origin.transform.position;
+            Tile own = GetTile(new Vector2Int(Mathf.RoundToInt(offset.x / tileSize), Mathf.RoundToInt(offset.z / tileSize)));
+            if (own != null)
+            {
+                own.SetBlocked(true);
+                own.SetProvidesCover(cover);
+                if (blocksSight)
+                {
+                    own.SetBlocksSight(true);
+                    own.SetBlockTop(b.max.y);
+                }
+            }
+            return own != null ? new List<Tile> { own } : null;
+        }
+
+        List<Tile> blocked = new List<Tile>();
+        Vector3 o = origin.transform.position;
+        float half = 0.5f * tileSize;
+        int x0 = Mathf.FloorToInt((b.min.x - o.x) / tileSize);
+        int x1 = Mathf.CeilToInt((b.max.x - o.x) / tileSize);
+        int y0 = Mathf.FloorToInt((b.min.z - o.z) / tileSize);
+        int y1 = Mathf.CeilToInt((b.max.z - o.z) / tileSize);
+
+        Vector2Int middle = new Vector2Int(Mathf.RoundToInt((b.center.x - o.x) / tileSize), Mathf.RoundToInt((b.center.z - o.z) / tileSize));
+
+        for (int x = x0; x <= x1; x++)
+        {
+            for (int y = y0; y <= y1; y++)
+            {
+                Tile tile = GetTile(new Vector2Int(x, y));
+                if (tile == null)
+                    continue;
+
+                float cx = o.x + x * tileSize, cz = o.z + y * tileSize;
+                float overlapX = Mathf.Min(b.max.x, cx + half) - Mathf.Max(b.min.x, cx - half);
+                float overlapZ = Mathf.Min(b.max.z, cz + half) - Mathf.Max(b.min.z, cz - half);
+                float covered = overlapX > 0f && overlapZ > 0f ? overlapX * overlapZ / (tileSize * tileSize) : 0f;
+
+                if (covered >= 0.33f || tile.Coords == middle)
+                {
+                    tile.SetBlocked(true);
+                    tile.SetProvidesCover(cover);
+                    if (blocksSight)
+                    {
+                        tile.SetBlocksSight(true);
+                        tile.SetBlockTop(b.max.y);
+                    }
+                    blocked.Add(tile);
+                }
+            }
+        }
+
+        return blocked;
+    }
+
+    // A building with a ladder (LadderFoot / LadderBase / RoofLevel markers in the model) gets a walkable roof, but only when
+    // the tile in front of the ladder is a free ground tile. The roof is all the tiles under the building.
+    private void FinalizeLadders(List<PendingLadder> pending, float tileSize, float groundTop)
+    {
+        if (pending.Count == 0)
+            return;
+
+        Tile origin = GetTile(Vector2Int.zero);
+        if (origin == null)
+            return;
+        Vector3 o = origin.transform.position;
+
+        foreach (PendingLadder p in pending)
+        {
+            Transform footMark = FindMarker(p.go, "LadderFoot");
+            Transform baseMark = FindMarker(p.go, "LadderBase");
+            Transform topMark = FindMarker(p.go, "LadderTop");
+            Transform roofMark = FindMarker(p.go, "RoofLevel");
+            if (footMark == null || roofMark == null)
+                continue;
+
+            Vector2Int footCoords = new Vector2Int(Mathf.RoundToInt((footMark.position.x - o.x) / tileSize), Mathf.RoundToInt((footMark.position.z - o.z) / tileSize));
+            Tile footTile = GetTile(footCoords);
+            if (footTile == null || footTile.IsBlocked || footTile.HasRoof || ladderByTile.ContainsKey(footTile))
+                continue;
+
+            // the roof tile: the tile of this building that touches the foot tile (the one nearest to the top of the ladder)
+            Tile roofTile = null;
+            float bestDistance = float.PositiveInfinity;
+            Vector3 reference = topMark != null ? topMark.position : roofMark.position;
+            foreach (Vector2Int dir in Directions)
+            {
+                Tile neighbour = GetTile(footCoords + dir);
+                if (neighbour == null || !p.tiles.Contains(neighbour) || neighbour.HasRoof)
+                    continue;
+
+                Vector3 delta = neighbour.transform.position - reference;
+                delta.y = 0f;
+                if (delta.magnitude < bestDistance)
+                {
+                    bestDistance = delta.magnitude;
+                    roofTile = neighbour;
+                }
+            }
+            if (roofTile == null)
+                continue;
+
+            float roofHeight = roofMark.position.y;
+            foreach (Tile t in p.tiles)
+            {
+                t.SetRoof(roofHeight);
+                if (t.BlocksSight)
+                    t.SetBlockTop(roofHeight);
+                AddRoofPick(t, roofHeight, tileSize);
+            }
+
+            Vector3 toRoof = roofTile.transform.position - footTile.transform.position;
+            toRoof.y = 0f;
+            Vector3 bottom = baseMark != null
+                ? new Vector3(baseMark.position.x, groundTop, baseMark.position.z)
+                : new Vector3(footTile.transform.position.x, groundTop, footTile.transform.position.z) + toRoof.normalized * (0.38f * tileSize);
+
+            Ladder ladder = new Ladder
+            {
+                foot = footTile,
+                roof = roofTile,
+                climbBottom = bottom,
+                climbTop = new Vector3(bottom.x, roofHeight, bottom.z)
+            };
+            ladderByTile[footTile] = ladder;
+            ladderByTile[roofTile] = ladder;
+        }
+    }
+
+    // A thin collider lying on the roof of a tile, so that a mouse click on the roof finds the roof tile.
+    private static void AddRoofPick(Tile tile, float roofHeight, float tileSize)
+    {
+        GameObject pick = new GameObject("RoofPick");
+        pick.transform.SetParent(tile.transform, false);
+        pick.transform.position = new Vector3(tile.transform.position.x, roofHeight - 0.03f, tile.transform.position.z);
+
+        Vector3 s = pick.transform.lossyScale;
+        BoxCollider box = pick.AddComponent<BoxCollider>();
+        box.size = new Vector3(tileSize * 0.98f / Mathf.Max(0.0001f, s.x), 0.06f / Mathf.Max(0.0001f, s.y), tileSize * 0.98f / Mathf.Max(0.0001f, s.z));
+        pick.AddComponent<RoofPick>();
+    }
+
+    private static void SetLayerRecursively(GameObject go, int layer)
+    {
+        foreach (Transform t in go.GetComponentsInChildren<Transform>(true))
+            t.gameObject.layer = layer;
+    }
+
+    private GameObject InstantiateObject(GameObject prefab, Transform parent)
+    {
+#if UNITY_EDITOR
+        if (!Application.isPlaying)
+            return (GameObject)PrefabUtility.InstantiatePrefab(prefab, parent);
+#endif
+        return Instantiate(prefab, parent);
     }
 
     private void SetEdgeBlocked(Vector2Int a, Vector2Int b, bool blocked)

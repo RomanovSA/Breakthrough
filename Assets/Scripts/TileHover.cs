@@ -11,7 +11,7 @@ using UnityEngine.InputSystem;
 public class TileHover : MonoBehaviour
 {
     [SerializeField] private Camera targetCamera;
-    [SerializeField] private LayerMask raycastMask = ~0;
+    [SerializeField] private LayerMask raycastMask = Physics.DefaultRaycastLayers;   // everything except 'Ignore Raycast'
 
     private Tile hoveredTile;
 
@@ -47,7 +47,8 @@ public class TileHover : MonoBehaviour
             return null;
 
         // If the first thing under the cursor is a unit or a wall (not a tile), nothing is highlighted.
-        return hit.collider.GetComponentInParent<Tile>();
+        // a tile under a building, car, palm... is not highlighted; the roof of a building (with a ladder) is
+        return Tile.FromCollider(hit.collider);
     }
 
     private void SetHovered(Tile tile)

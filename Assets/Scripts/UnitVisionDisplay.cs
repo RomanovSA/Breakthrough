@@ -76,6 +76,7 @@ public class UnitVisionDisplay : MonoBehaviour
         float angle = Mathf.Clamp(unit.ViewAngle, 1f, 360f);
         Vector3 forward = unit.FacingDirection;
         Vector3 origin = transform.position;
+        origin.y = unit.transform.position.y + (grid != null ? grid.OverlayHeight : 0.02f) + 0.02f;   // above the tile marks
 
         int rays = Mathf.Max(2, Mathf.CeilToInt(angle / rayStepDegrees) + 1);
         Color baseColor = unit.Faction == Faction.Player ? playerColor : enemyColor;
