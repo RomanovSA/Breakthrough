@@ -151,7 +151,7 @@ public static class Pathfinder
             return result;
 
         HashSet<Vector2Int> blocked = mover != null ? Unit.GetOccupiedCoords(mover) : null;
-        int[,] dist = BuildDistanceField(grid, s, size, blocked);
+        int[,] dist = BuildDistanceField(grid, s, size, blocked, maxSteps);
         for (int x = 0; x < size.x; x++)
         {
             for (int y = 0; y < size.y; y++)
@@ -166,7 +166,8 @@ public static class Pathfinder
 
     // Cheapest cost (in action points) from the source to every tile over side-adjacent steps; a ladder costs more than a
     // step (GridManager.StepCost). -1 means 'not reachable'.
-    private static int[,] BuildDistanceField(GridManager grid, Vector2Int source, Vector2Int size, HashSet<Vector2Int> blocked)
+    // 'maxCost' stops the search early: tiles farther than that are not needed (they may be left out or have a larger cost than the real one).
+    private static int[,] BuildDistanceField(GridManager grid, Vector2Int source, Vector2Int size, HashSet<Vector2Int> blocked, int maxCost = int.MaxValue)
     {
         int[,] dist = new int[size.x, size.y];
         for (int x = 0; x < size.x; x++)
@@ -183,6 +184,8 @@ public static class Pathfinder
             open.Remove(item);
             if (item.cost > dist[item.x, item.y])
                 continue;                                  // an older, longer entry
+            if (item.cost >= maxCost)
+                continue;                                  // nothing beyond this is wanted
 
             Vector2Int c = new Vector2Int(item.x, item.y);
             foreach (Vector2Int d in Directions)

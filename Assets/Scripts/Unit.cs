@@ -492,6 +492,9 @@ public class Unit : MonoBehaviour
         }
 
         actionPoints = Mathf.Max(0, actionPoints - cost);
+
+        // every hop is heard by the other side if it is near (NoiseSystem)
+        NoiseSystem.Emit(NoiseKind.Footsteps, this, transform.position);
     }
 
     /// <summary>

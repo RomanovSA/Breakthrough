@@ -5,14 +5,20 @@ using UnityEditor;
 #endif
 
 /// <summary>
-/// Spawns units on random, different tiles of the field every time the field is (re)built.
+/// Spawns units on the tiles of the field every time the field is (re)built.
 /// What is spawned is described by a list of groups: a unit prefab and how many of it.
 /// The prefab decides the faction (for example one group of player units and one of enemies).
 ///
-/// Units of the Squad Faction (the enemies) do not spawn one by one but in squads of Squad Min to Squad Max units (the count of the
-/// group is split into squads of those sizes, for example 10 = 4 + 3 + 3): the members stand close together (within Squad Spread
-/// tiles of the squad's first tile) and the squads stand apart (at least Squad Min Distance tiles). Each squad is an EnemyGroup, which
-/// the members share their intelligence through. The other factions spawn as before, each unit on its own random tile.
+/// Where they stand:
+///  - The units of the Edge Faction (the player) spawn together, in one cluster at one of the four edges of the field (chosen at random):
+///    the first tile is within Edge Depth tiles of the edge, the others are the nearest free tiles around it.
+///  - The units of the Squad Faction (the enemies) spawn in squads of Squad Min to Squad Max units (the count of the group is split into
+///    squads of those sizes, for example 9 = 3 + 3 + 3 or 4 + 3 + 2): the members stand close together (within Squad Spread tiles of the
+///    squad's first tile) and the squads stand apart (at least Squad Min Distance tiles). No unit of a squad stands closer than
+///    Enemy Min Distance tiles to any unit of the Edge Faction. Each squad is an EnemyGroup, which the members share their intelligence through.
+///  - Units of any other faction stand each on its own random tile.
+/// The player's group is placed first, whatever its place in the list, because the enemies keep away from it.
+/// If the field has no room for the wanted distances, the units are put as far apart as the field allows (a warning is written).
 ///
 /// Right-click the component header and choose "Spawn" to respawn everything by hand in the editor.
 /// The spawned units are parented to this object; any previous ones are removed first.
@@ -31,6 +37,14 @@ public class UnitSpawner : MonoBehaviour
     [SerializeField] private GridManager grid;
     [SerializeField] private List<SpawnGroup> groups = new List<SpawnGroup>();
 
+    [Header("Player side")]
+    [Tooltip("The units of this faction spawn together at one edge of the field.")]
+    [SerializeField] private Faction edgeFaction = Faction.Player;
+    [Tooltip("The first tile of the cluster lies within this many tiles of the edge.")]
+    [SerializeField, Min(0)] private int edgeDepth = 3;
+    [Tooltip("No enemy spawns closer than this many tiles to a unit of the player.")]
+    [SerializeField, Min(0)] private float enemyMinDistance = 20f;
+
     [Header("Squads")]
     [Tooltip("The units of this faction spawn in squads.")]
     [SerializeField] private Faction squadFaction = Faction.Enemy;
@@ -45,6 +59,9 @@ public class UnitSpawner : MonoBehaviour
 
     /// <summary>Raised after all units have been spawned (and placed on their tiles).</summary>
     public event System.Action UnitsSpawned;
+
+    /// <summary>The edge of the field the player's units spawned at last time: 0 west (x small), 1 east, 2 south (y small), 3 north; -1 if none.</summary>
+    public int LastEdge { get; private set; } = -1;
 
     private void OnEnable()
     {
@@ -97,6 +114,7 @@ public class UnitSpawner : MonoBehaviour
 
         Clear();
         EnemyGroup.Reset();
+        LastEdge = -1;
 
         // Shuffle the tiles (Fisher-Yates) and hand them out one by one, so no two units share a tile.
         for (int i = tiles.Length - 1; i > 0; i--)
@@ -113,23 +131,60 @@ public class UnitSpawner : MonoBehaviour
 
         HashSet<Vector2Int> used = new HashSet<Vector2Int>();
         List<Vector2Int> squadAnchors = new List<Vector2Int>();
+        List<Vector2Int> edgeUnits = new List<Vector2Int>();       // where the units of the Edge Faction stand: the enemies keep away from them
         int nextTile = 0;
+
+        // the player's group first
+        List<SpawnGroup> ordered = new List<SpawnGroup>();
+        foreach (SpawnGroup group in groups)
+        {
+            if (group != null && group.prefab != null && group.prefab.Faction == edgeFaction)
+                ordered.Add(group);
+        }
+        foreach (SpawnGroup group in groups)
+        {
+            if (group != null && group.prefab != null && group.prefab.Faction != edgeFaction)
+                ordered.Add(group);
+        }
 
         foreach (SpawnGroup group in groups)
         {
             if (group == null || group.prefab == null)
-            {
                 Debug.LogWarning("UnitSpawner: a spawn group has no prefab.", this);
+        }
+
+        foreach (SpawnGroup group in ordered)
+        {
+            int serial = 0;
+
+            if (group.prefab.Faction == edgeFaction)
+            {
+                // one cluster at one edge
+                List<Tile> places = ChooseEdgePlaces(group.count, tiles, byCoords, used);
+                foreach (Tile place in places)
+                {
+                    Unit unit = SpawnUnit(group.prefab);
+                    unit.name = unit.Faction + "Unit_" + (++serial);
+                    if (!unit.PlaceOn(place))
+                    {
+                        Debug.LogWarning("UnitSpawner: the tile was already taken, the unit was not spawned.", this);
+                        DestroyImmediate(unit.gameObject);
+                        continue;
+                    }
+
+                    used.Add(place.Coords);
+                    edgeUnits.Add(place.Coords);
+                    result.Add(unit);
+                }
                 continue;
             }
 
-            int serial = 0;
             if (group.prefab.Faction == squadFaction)
             {
-                // squads
+                // squads, far from the player's units
                 foreach (int size in SquadSizes(group.count, squadMin, Mathf.Max(squadMin, squadMax)))
                 {
-                    List<Tile> places = ChooseSquadPlaces(size, tiles, byCoords, used, squadAnchors);
+                    List<Tile> places = ChooseSquadPlaces(size, tiles, byCoords, used, squadAnchors, edgeUnits);
                     List<Unit> members = new List<Unit>();
                     foreach (Tile place in places)
                     {
@@ -188,7 +243,7 @@ public class UnitSpawner : MonoBehaviour
         return result;
     }
 
-    /// <summary>Splits 'count' units into squads of min to max units (for example 10 into 4 + 3 + 3); never leaves a squad of one.</summary>
+    /// <summary>Splits 'count' units into squads of min to max units (for example 9 into 3 + 3 + 3); never leaves a squad of one.</summary>
     public static List<int> SquadSizes(int count, int min, int max)
     {
         List<int> sizes = new List<int>();
@@ -210,19 +265,73 @@ public class UnitSpawner : MonoBehaviour
         return sizes;
     }
 
-    // The tiles for one squad: a first tile far from the other squads, and the nearest free tiles around it.
-    private List<Tile> ChooseSquadPlaces(int size, Tile[] shuffled, Dictionary<Vector2Int, Tile> byCoords, HashSet<Vector2Int> used, List<Vector2Int> anchors)
+    // How far a tile is from the given edge of the field (0 west, 1 east, 2 south, 3 north), in tiles.
+    private int EdgeDistance(Vector2Int c, int edge)
+    {
+        Vector2Int size = grid.Size;
+        switch (edge)
+        {
+            case 0: return c.x;
+            case 1: return size.x - 1 - c.x;
+            case 2: return c.y;
+            default: return size.y - 1 - c.y;
+        }
+    }
+
+    // The tiles for the player's units: one of the four edges at random (another one if that edge has no room), and at that edge a first
+    // tile (within Edge Depth of it) with the nearest free tiles around it.
+    private List<Tile> ChooseEdgePlaces(int count, Tile[] shuffled, Dictionary<Vector2Int, Tile> byCoords, HashSet<Vector2Int> used)
+    {
+        List<int> edges = new List<int> { 0, 1, 2, 3 };
+        for (int i = edges.Count - 1; i > 0; i--)
+        {
+            int j = Random.Range(0, i + 1);
+            int tmp = edges[i];
+            edges[i] = edges[j];
+            edges[j] = tmp;
+        }
+
+        foreach (int edge in edges)
+        {
+            foreach (Tile candidate in shuffled)
+            {
+                if (used.Contains(candidate.Coords) || EdgeDistance(candidate.Coords, edge) > edgeDepth)
+                    continue;
+
+                List<Tile> places = GatherAround(candidate, count, byCoords, used, Mathf.Max(squadSpread, Mathf.CeilToInt(Mathf.Sqrt(count))));
+                if (places.Count >= count)
+                {
+                    LastEdge = edge;
+                    return places;
+                }
+            }
+        }
+
+        Debug.LogWarning("UnitSpawner: no edge of the field has room for the player's units; they were put on random tiles.", this);
+        List<Tile> any = new List<Tile>();
+        foreach (Tile t in shuffled)
+        {
+            if (!used.Contains(t.Coords))
+                any.Add(t);
+            if (any.Count >= count)
+                break;
+        }
+        return any;
+    }
+
+    // The tiles for one squad: a first tile far from the other squads and from the player's units, and the nearest free tiles around it.
+    private List<Tile> ChooseSquadPlaces(int size, Tile[] shuffled, Dictionary<Vector2Int, Tile> byCoords, HashSet<Vector2Int> used, List<Vector2Int> anchors, List<Vector2Int> keepAway)
     {
         Tile anchor = null;
         List<Tile> best = null;
-        float bestSpacing = -1f;
+        float bestScore = float.NegativeInfinity;                // for the fallback: how near the wishes it came (higher is better)
 
         int tries = 0;
         foreach (Tile candidate in shuffled)
         {
             if (used.Contains(candidate.Coords))
                 continue;
-            if (++tries > 400)
+            if (++tries > 1500)
                 break;
 
             // how far is it from the nearest other squad?
@@ -230,23 +339,41 @@ public class UnitSpawner : MonoBehaviour
             foreach (Vector2Int a in anchors)
                 spacing = Mathf.Min(spacing, Vector2Int.Distance(a, candidate.Coords));
 
-            List<Tile> places = GatherAround(candidate, size, byCoords, used);
+            List<Tile> places = GatherAround(candidate, size, byCoords, used, squadSpread);
             if (places.Count < size)
                 continue;                                   // too cramped here
 
-            if (spacing >= squadMinDistance)
+            // how far is the nearest of its units from the nearest unit of the player?
+            float away = float.PositiveInfinity;
+            foreach (Tile p in places)
+                foreach (Vector2Int e in keepAway)
+                    away = Mathf.Min(away, Vector2Int.Distance(p.Coords, e));
+
+            if (away >= enemyMinDistance && spacing >= squadMinDistance)
             {
                 anchor = candidate;
                 best = places;
                 break;
             }
 
-            if (spacing > bestSpacing)
+            // the best that can be had: the distance from the player counts more than the spacing between squads
+            float score = Mathf.Min(away, enemyMinDistance) * 2f + Mathf.Min(spacing, squadMinDistance);
+            if (score > bestScore)
             {
-                bestSpacing = spacing;
+                bestScore = score;
                 anchor = candidate;
                 best = places;
             }
+        }
+
+        if (best != null && keepAway.Count > 0)
+        {
+            float nearest = float.PositiveInfinity;
+            foreach (Tile p in best)
+                foreach (Vector2Int e in keepAway)
+                    nearest = Mathf.Min(nearest, Vector2Int.Distance(p.Coords, e));
+            if (nearest < enemyMinDistance)
+                Debug.LogWarning("UnitSpawner: the field has no room to keep a squad " + enemyMinDistance + " tiles from the player's units; the nearest is " + nearest.ToString("0.0") + " tiles away.", this);
         }
 
         if (best == null)
@@ -269,10 +396,10 @@ public class UnitSpawner : MonoBehaviour
         return best;
     }
 
-    // The tile itself and the nearest free tiles around it (within the squad's spread, a little more if need be).
-    private List<Tile> GatherAround(Tile centre, int size, Dictionary<Vector2Int, Tile> byCoords, HashSet<Vector2Int> used)
+    // The tile itself and the nearest free tiles around it (within the given spread, a little more if need be).
+    private List<Tile> GatherAround(Tile centre, int size, Dictionary<Vector2Int, Tile> byCoords, HashSet<Vector2Int> used, int baseSpread)
     {
-        for (int spread = squadSpread; spread <= squadSpread + 3; spread++)
+        for (int spread = baseSpread; spread <= baseSpread + 3; spread++)
         {
             List<Tile> near = new List<Tile>();
             for (int dx = -spread; dx <= spread; dx++)
@@ -299,6 +426,7 @@ public class UnitSpawner : MonoBehaviour
             foreach (Tile t in near)
                 key[t] = Vector2Int.Distance(t.Coords, centre.Coords) + Random.value * 0.4f;
             near.Sort((a, b) => key[a].CompareTo(key[b]));
+
             List<Tile> result = new List<Tile> { centre };
             for (int i = 0; i < near.Count && result.Count < size; i++)
                 result.Add(near[i]);

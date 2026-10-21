@@ -550,8 +550,21 @@ public class GridManager : MonoBehaviour
             new Vector3(spot, 0f, spot), new Vector3(-spot, 0f, spot), new Vector3(spot, 0f, -spot), new Vector3(-spot, 0f, -spot)
         };
 
-        foreach (Tile tile in tileList)
+        // only the tiles within reach of the viewer (a square around it) are looked at, not the whole field
+        Tile first = GetTile(Vector2Int.zero);
+        if (first == null)
+            return;
+        Vector3 p0 = first.transform.position;
+        Vector2Int fieldSize = Size;
+        int reach = Mathf.CeilToInt(rangeTiles) + 2;
+        int ci = Mathf.RoundToInt((origin.x - p0.x) / s), cj = Mathf.RoundToInt((origin.z - p0.z) / s);
+        int xMin = Mathf.Max(0, ci - reach), xMax = Mathf.Min(fieldSize.x - 1, ci + reach);
+        int yMin = Mathf.Max(0, cj - reach), yMax = Mathf.Min(fieldSize.y - 1, cj + reach);
+
+        for (int ix = xMin; ix <= xMax; ix++)
+        for (int iy = yMin; iy <= yMax; iy++)
         {
+            Tile tile = GetTile(new Vector2Int(ix, iy));
             if (tile == null)
                 continue;
 
