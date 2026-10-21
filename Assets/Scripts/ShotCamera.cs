@@ -70,6 +70,8 @@ public class ShotCamera : MonoBehaviour
     private float measureTimer;
     private UnitHitbox hitbox;
     private bool shotFired;
+    private int burstLeft;                      // bullets of the present shot that have not left the weapon yet (a burst fires them one after another)
+    private float burstTimer;
     private Vector3 peekOffset;                  // how far the shooter leans out of cover for this shot
 
     // the enemies the shooter could see when the view began, from left to right: the shot can be switched between them
@@ -145,6 +147,8 @@ public class ShotCamera : MonoBehaviour
         target = targetUnit;
         CollectTargets();
         switchProgress = 1f;
+        burstLeft = 0;
+        shooter.EnsureAffordableMode();                  // a burst that costs more than the unit has is not what it starts the shot view with
 
         savedPosition = cam.transform.position;
         savedRotation = cam.transform.rotation;
@@ -197,7 +201,7 @@ public class ShotCamera : MonoBehaviour
     }
 
     /// <summary>The shot view is on, the camera is in place and the last bullet is gone: a bullet can be fired.</summary>
-    public bool CanShoot => state == State.Holding && ring != null && !Bullet.AnyInFlight && shooter != null && target != null && target.IsAlive && shooter.CanAffordShot && !IsSwitching;
+    public bool CanShoot => state == State.Holding && ring != null && !Bullet.AnyInFlight && shooter != null && target != null && target.IsAlive && shooter.CanAffordCurrentShot && !IsSwitching && burstLeft <= 0;
 
     /// <summary>The bullet that was fired last (null if none yet in this shot view).</summary>
     public Bullet LastBullet { get; private set; }
@@ -206,16 +210,18 @@ public class ShotCamera : MonoBehaviour
     public Vector3 LastAimPoint { get; private set; }
 
     /// <summary>
-    /// Fires one bullet: from the muzzle of the shooter's weapon to a random point inside the ring (as big as it is now).
-    /// The bullet is a real body: whatever it meets on the way takes the hit instead of the target. The target's collider is
-    /// made in the exact shape of the body in its present pose. Returns false when a shot is not possible just now.
+    /// Fires a shot in the way of firing that the weapon is set to: one bullet, or a burst (the bullets leave one after another). Every bullet
+    /// goes from the muzzle of the shooter's weapon to its own random point inside the ring (as big as it is now), so some of a burst may hit and
+    /// some miss. The bullets are real bodies: whatever they meet on the way takes the hit instead of the target. The target's collider is
+    /// made in the exact shape of the body in its present pose. The action points are paid once for the shot. Returns false when a shot is
+    /// not possible just now.
     /// </summary>
     public bool Shoot()
     {
         if (!CanShoot || shooter == null || target == null)
             return false;
 
-        // the points are paid when the bullet leaves
+        // the points are paid when the first bullet leaves
         if (!shooter.TrySpendActionPoints(shooter.ShotCost))
             return false;
         shotFired = true;
@@ -226,12 +232,67 @@ public class ShotCamera : MonoBehaviour
             hitbox = target.gameObject.AddComponent<UnitHitbox>();
         hitbox.Build();
 
+        burstLeft = shooter.ShotsPerFire;
+        FireNextBullet();
+        return true;
+    }
+
+    // One bullet of the shot leaves the weapon; the next one follows after the weapon's interval.
+    private void FireNextBullet()
+    {
+        if (burstLeft <= 0 || shooter == null || target == null)
+        {
+            burstLeft = 0;
+            return;
+        }
+
         UnitAnimator animator = shooter.GetComponentInChildren<UnitAnimator>();
         if (animator != null)
             animator.PlayShoot();
 
         LastAimPoint = ring.RandomPointInRing();
-        LastBullet = Bullet.Fire(shooter, target, shooter.MuzzlePosition, LastAimPoint, shooter.WeaponDamage);
+        LastBullet = Bullet.Fire(shooter, target, shooter.MuzzlePosition, LastAimPoint, shooter.WeaponDamage, shooter.BulletSpeed);
+        burstLeft--;
+        burstTimer = shooter.ShotInterval;
+    }
+
+    // The bullets of a burst follow each other; if the target has been killed the rest of the burst is not fired.
+    private void UpdateBurst(float deltaTime)
+    {
+        if (burstLeft <= 0)
+            return;
+
+        if (target == null || !target.IsAlive)
+        {
+            burstLeft = 0;
+            return;
+        }
+
+        burstTimer -= deltaTime;
+        if (burstTimer <= 0f)
+            FireNextBullet();
+    }
+
+    /// <summary>The fire mode can be changed now: another mode that the shooter has the points for, nothing is flying, the camera is in place.</summary>
+    public bool CanChangeFireMode => state == State.Holding && shooter != null && shooter.CanSwitchFireMode && !Bullet.AnyInFlight && burstLeft <= 0 && !IsSwitching;
+
+    /// <summary>Raised when the shooter's way of firing was changed in the shot view.</summary>
+    public event System.Action FireModeChanged;
+
+    /// <summary>
+    /// Switches the shooter's weapon to its next way of firing that he has the points for (single shot, burst...). The ring opens up and closes
+    /// in again at the size of the new mode (a burst is less accurate than a single shot). Returns whether it was changed.
+    /// </summary>
+    public bool CycleFireMode()
+    {
+        if (!CanChangeFireMode || !shooter.CycleFireMode(true))
+            return false;
+
+        ring.Show(shooter, target);
+        holdTime = 0f;
+        chance = 0f;
+        measureTimer = 0f;
+        FireModeChanged?.Invoke();
         return true;
     }
 
@@ -263,7 +324,7 @@ public class ShotCamera : MonoBehaviour
     /// </summary>
     public bool SwitchTarget(Unit newTarget)
     {
-        if (state != State.Holding || IsSwitching || Bullet.AnyInFlight || shooter == null)
+        if (state != State.Holding || IsSwitching || Bullet.AnyInFlight || burstLeft > 0 || shooter == null)
             return false;
         if (newTarget == null || newTarget == target || !newTarget.IsAlive || !targets.Contains(newTarget))
             return false;
@@ -411,10 +472,11 @@ public class ShotCamera : MonoBehaviour
             case State.Holding:
                 holdTime += deltaTime;
                 UpdateEffects();
+                UpdateBurst(deltaTime);
                 UpdateAfterShot(deltaTime);
                 UpdateSwitch(deltaTime);
                 HandleTargetInput();
-                if (shooter == null || target == null || !shooter.IsAlive || ExitPressed())
+                if (shooter == null || target == null || !shooter.IsAlive || (burstLeft <= 0 && ExitPressed()))
                     state = State.MovingOut;
                 break;
 
@@ -431,7 +493,7 @@ public class ShotCamera : MonoBehaviour
 
     private void UpdateAfterShot(float deltaTime)
     {
-        if (!shotFired || Bullet.AnyInFlight)
+        if (!shotFired || Bullet.AnyInFlight || burstLeft > 0)
         {
             afterShotTimer = -1f;
             return;
@@ -449,6 +511,8 @@ public class ShotCamera : MonoBehaviour
 
         shotFired = false;
         afterShotTimer = -1f;
+        if (shooter != null)
+            shooter.EnsureAffordableMode();
         if (shooter == null || !shooter.CanAffordShot)
         {
             state = State.MovingOut;
@@ -654,7 +718,10 @@ public class ShotCamera : MonoBehaviour
         float visibility = Mathf.Clamp01((progress - 0.45f) / 0.55f);
 
         if (ring != null)
+        {
+            ring.SetShots(shooter != null ? shooter.ShotsPerFire : 1);
             ring.Tick(visibility, holdTime, cam);
+        }
         if (highlight != null)
             highlight.Pulse(Time.unscaledTime, Mathf.Clamp01(progress * 1.6f));
 

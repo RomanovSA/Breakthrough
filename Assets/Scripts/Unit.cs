@@ -41,6 +41,12 @@ public class Unit : MonoBehaviour
     [SerializeField] private Transform muzzle;
     [Tooltip("Action points one shot costs.")]
     [SerializeField, Min(0)] private int shotCost = 2;
+
+    [Header("Weapon")]
+    [Tooltip("The weapon this unit carries (a WeaponData asset): its accuracy, damage, bullet speed and ways of firing. With a weapon here, the Aim Spread, Weapon Damage and Shot Cost above are not used.")]
+    [SerializeField] private WeaponData weapon;
+    [Tooltip("The ammunition in the weapon. Empty = the weapon's own.")]
+    [SerializeField] private AmmoType ammo;
     [Tooltip("Action points it costs to turn towards the mouse (right click).")]
     [SerializeField, Min(0)] private int turnCost = 1;
     [Tooltip("Action points it costs to crouch, and the same to stand up again.")]
@@ -154,13 +160,80 @@ public class Unit : MonoBehaviour
     public Faction Faction => faction;
 
     /// <summary>Half-angle (degrees) of the cone the bullets of this unit land in; smaller = a better shot.</summary>
-    public float AimSpread => aimSpread;
+    /// <summary>The weapon this unit carries (null if it has none: then the plain numbers on the unit are used).</summary>
+    public WeaponData Weapon => weapon;
+
+    /// <summary>The ammunition in the weapon.</summary>
+    public AmmoType Ammo => ammo != null ? ammo : weapon != null ? weapon.DefaultAmmo : null;
+
+    private int fireModeIndex;
+
+    /// <summary>The way of firing that is selected now (null if the unit has no weapon).</summary>
+    public FireModeData FireMode
+    {
+        get
+        {
+            if (weapon == null || weapon.FireModes.Count == 0)
+                return null;
+            return weapon.FireModes[Mathf.Clamp(fireModeIndex, 0, weapon.FireModes.Count - 1)];
+        }
+    }
+
+    public int FireModeIndex => fireModeIndex;
+
+    /// <summary>How many ways of firing the weapon has (1 for a unit without a weapon).</summary>
+    public int FireModeCount => weapon != null ? Mathf.Max(1, weapon.FireModes.Count) : 1;
+
+    /// <summary>
+    /// How far, in degrees, the bullets scatter: the weapon's accuracy, made worse or better by the way of firing and by the ammunition.
+    /// (Without a weapon: the plain Aim Spread of the unit.)
+    /// </summary>
+    public float AimSpread
+    {
+        get
+        {
+            if (weapon == null)
+                return aimSpread;
+
+            float spread = weapon.SpreadDegrees;
+            FireModeData mode = FireMode;
+            if (mode != null)
+                spread *= mode.spreadMultiplier;
+            AmmoType a = Ammo;
+            if (a != null)
+                spread *= a.SpreadMultiplier;
+            return spread;
+        }
+    }
 
     /// <summary>Health that a bullet of this unit takes away.</summary>
-    public int WeaponDamage => weaponDamage;
+    public int WeaponDamage => weapon != null ? weapon.DamagePerBullet(ammo) : weaponDamage;
+
+    /// <summary>How fast this unit's bullets fly (world units per second).</summary>
+    public float BulletSpeed => weapon != null ? weapon.BulletSpeed : 40f;
+
+    /// <summary>How many bullets one shot in the present way of firing sends (3 for a burst of three).</summary>
+    public int ShotsPerFire => FireMode != null ? Mathf.Max(1, FireMode.shots) : 1;
+
+    /// <summary>Seconds between the bullets of a burst.</summary>
+    public float ShotInterval => FireMode != null ? FireMode.shotInterval : 0.1f;
 
     /// <summary>Action points one shot costs.</summary>
-    public int ShotCost => shotCost;
+    public int ShotCost => FireMode != null ? FireMode.apCost : shotCost;
+
+    /// <summary>What the cheapest way of firing costs.</summary>
+    public int CheapestShotCost
+    {
+        get
+        {
+            if (weapon == null || weapon.FireModes.Count == 0)
+                return shotCost;
+            int cheapest = int.MaxValue;
+            foreach (FireModeData m in weapon.FireModes)
+                cheapest = Mathf.Min(cheapest, m.apCost);
+            return cheapest;
+        }
+    }
 
     /// <summary>Action points a turn on the spot (TurnTo) costs.</summary>
     public int TurnCost => turnCost;
@@ -218,7 +291,76 @@ public class Unit : MonoBehaviour
     public const float MinTurnAngle = 3f;
 
     /// <summary>True if there are enough action points left for one shot.</summary>
-    public bool CanAffordShot => IsAlive && actionPoints >= shotCost;
+    public bool CanAffordShot => IsAlive && actionPoints >= CheapestShotCost;
+
+    /// <summary>True if there are enough action points for a shot in the way of firing that is selected now.</summary>
+    public bool CanAffordCurrentShot => IsAlive && actionPoints >= ShotCost;
+
+    /// <summary>True if there is another way of firing that the unit has the points for (so that switching the mode would do something).</summary>
+    public bool CanSwitchFireMode
+    {
+        get
+        {
+            if (weapon == null)
+                return false;
+            for (int i = 0; i < weapon.FireModes.Count; i++)
+            {
+                if (i != fireModeIndex && weapon.FireModes[i].apCost <= actionPoints)
+                    return true;
+            }
+            return false;
+        }
+    }
+
+    /// <summary>Selects another way of firing (false if there is no such one or it is the one selected already).</summary>
+    public bool SetFireMode(int index)
+    {
+        if (weapon == null || index < 0 || index >= weapon.FireModes.Count || index == fireModeIndex)
+            return false;
+        fireModeIndex = index;
+        return true;
+    }
+
+    /// <summary>
+    /// Selects the next way of firing, round and round; with 'onlyAffordable' only one that the unit has the points for.
+    /// Returns whether the selection changed.
+    /// </summary>
+    public bool CycleFireMode(bool onlyAffordable)
+    {
+        if (weapon == null || weapon.FireModes.Count < 2)
+            return false;
+
+        int count = weapon.FireModes.Count;
+        for (int step = 1; step < count; step++)
+        {
+            int candidate = (fireModeIndex + step) % count;
+            if (!onlyAffordable || weapon.FireModes[candidate].apCost <= actionPoints)
+            {
+                fireModeIndex = candidate;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// If the way of firing that is selected costs more than the unit has points left, the cheapest one that it can pay for is selected
+    /// instead (so that a unit with two points does not stay on a burst that costs three).
+    /// </summary>
+    public void EnsureAffordableMode()
+    {
+        if (weapon == null || CanAffordCurrentShot)
+            return;
+
+        int best = -1;
+        for (int i = 0; i < weapon.FireModes.Count; i++)
+        {
+            if (weapon.FireModes[i].apCost <= actionPoints && (best < 0 || weapon.FireModes[i].apCost < weapon.FireModes[best].apCost))
+                best = i;
+        }
+        if (best >= 0)
+            fireModeIndex = best;
+    }
 
     /// <summary>Takes the action points away if there are enough of them; otherwise does nothing and returns false.</summary>
     public bool TrySpendActionPoints(int amount)

@@ -564,6 +564,7 @@ public class EnemyAI : MonoBehaviour
             yield break;
         }
 
+        ChooseFireMode(u, target);                          // single shot or burst, whichever should do more
         AttackPlan plan = PlanAttack(u, target, visible);
         if (plan == null)
         {
@@ -599,7 +600,9 @@ public class EnemyAI : MonoBehaviour
             }
         }
 
-        if (grid.CanSee(u, target) && u.CanAffordShot)
+        if (u != null)
+            u.EnsureAffordableMode();
+        if (grid.CanSee(u, target) && u.CanAffordCurrentShot)
         {
             stepDone = true;
             yield return FireAt(u, target);
@@ -685,6 +688,42 @@ public class EnemyAI : MonoBehaviour
         return best;
     }
 
+    // A weapon with more than one way of firing: the unit picks the one that should do the most damage this turn against this target. For each
+    // mode it works out the chance of a bullet hitting (a soldier covers roughly 0.18 square metres of the ring, whose size comes from the
+    // distance and the mode's spread) and how many times it could fire the mode with the points it has; a burst wins up close, where the
+    // bullets mostly land, and a single shot at a distance, where a burst only wastes bullets and points.
+    private void ChooseFireMode(Unit u, Unit target)
+    {
+        WeaponData w = u.Weapon;
+        if (w == null || w.FireModes.Count < 2)
+            return;
+
+        int ap = u.ActionPoints;
+        float distance = Vector3.Distance(u.transform.position, target.transform.position);
+        float ammoSpread = u.Ammo != null ? u.Ammo.SpreadMultiplier : 1f;
+        int bestIndex = -1;
+        float bestValue = -1f;
+        for (int i = 0; i < w.FireModes.Count; i++)
+        {
+            FireModeData m = w.FireModes[i];
+            if (m.apCost > ap || m.apCost <= 0)
+                continue;
+
+            float radius = Mathf.Max(0.14f, distance * Mathf.Tan(Mathf.Deg2Rad * w.SpreadDegrees * m.spreadMultiplier * ammoSpread));
+            float chance = Mathf.Min(0.9f, 0.18f / (Mathf.PI * radius * radius));
+            float value = (ap / m.apCost) * m.shots * chance;           // expected hits this turn if it keeps firing this mode
+
+            if (bestIndex < 0 || value > bestValue + 1e-4f)
+            {
+                bestIndex = i;
+                bestValue = value;
+            }
+        }
+
+        if (bestIndex >= 0)
+            u.SetFireMode(bestIndex);
+    }
+
     // With points left but none for another shot (or nowhere to shoot from): get into better cover from the enemy.
     private IEnumerator TakeCover(Unit u, List<Unit> visible)
     {
@@ -768,14 +807,22 @@ public class EnemyAI : MonoBehaviour
         hitbox.Build();
         Physics.SyncTransforms();
 
-        if (animator != null)
-            animator.PlayShoot();
-
-        Vector3 muzzle = u.MuzzlePosition;
-        Vector3 aim = RandomAimPoint(muzzle, chest, SpreadRing.SpreadRadius(u, target));
+        // the bullets of the shot, one after another (one for a single shot, three for a burst), each to its own random point of the ring
         int healthBefore = target.Health;
-        Bullet.Fire(u, target, muzzle, aim, u.WeaponDamage);
-        Note(Tag(u) + " fires at " + target.name + " from " + u.Coords + " (points left " + u.ActionPoints + ")");
+        FireModeData mode = u.FireMode;
+        int bullets = u.ShotsPerFire;
+        Note(Tag(u) + " fires at " + target.name + " from " + u.Coords + (bullets > 1 ? " (" + mode.displayName + " x" + bullets + ")" : "") + " (points left " + u.ActionPoints + ")");
+        for (int i = 0; i < bullets && u != null && u.IsAlive && target != null && target.IsAlive; i++)
+        {
+            if (animator != null)
+                animator.PlayShoot();
+
+            Vector3 muzzle = u.MuzzlePosition;
+            Vector3 aim = RandomAimPoint(muzzle, chest, SpreadRing.SpreadRadius(u, target));
+            Bullet.Fire(u, target, muzzle, aim, u.WeaponDamage, u.BulletSpeed);
+            if (i < bullets - 1)
+                yield return u.ShotInterval;
+        }
 
         yield return 0.05f;
         float fired = now;

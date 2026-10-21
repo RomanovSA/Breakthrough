@@ -43,6 +43,8 @@ public class SpreadRing : MonoBehaviour
     private float shownChance;
     private bool hasChance;
     private int shownPercent = -1;
+    private int shots = 1;
+    private int shownShots = 1;
 
     /// <summary>
     /// The radius of the ring of spread for a shot of this shooter at this target (distance x tan of the aim spread, never smaller than
@@ -102,6 +104,12 @@ public class SpreadRing : MonoBehaviour
         spriteRenderer.color = new Color(1f, 1f, 1f, 0f);
         label.gameObject.SetActive(true);
         label.color = new Color(1f, 1f, 1f, 0f);
+    }
+
+    /// <summary>How many bullets one shot sends: more than one is written after the chance (x3), which stays the chance of one bullet.</summary>
+    public void SetShots(int bullets)
+    {
+        shots = Mathf.Max(1, bullets);
     }
 
     /// <summary>The chance to hit (0 to 1) that goes next to the ring; the number on the screen follows it smoothly.</summary>
@@ -168,10 +176,11 @@ public class SpreadRing : MonoBehaviour
         int percent = Mathf.RoundToInt(shownChance * 100f);
         Color colour = shownChance < lowChance ? new Color(1f, 0.32f, 0.26f) : shownChance < highChance ? new Color(1f, 0.82f, 0.25f) : new Color(0.45f, 0.95f, 0.4f);
 
-        if (hasChance && percent != shownPercent)
+        if (hasChance && (percent != shownPercent || shots != shownShots))
         {
             shownPercent = percent;
-            label.text = "<b>" + percent + "%</b>";
+            shownShots = shots;
+            label.text = "<b>" + percent + "%</b>" + (shots > 1 ? "<size=55%> x" + shots + "</size>" : "");
         }
         else if (!hasChance)
         {

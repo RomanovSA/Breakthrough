@@ -351,6 +351,11 @@ MonoBehaviour:
   aimSpread: 3
   weaponDamage: 30
   muzzle: {fileID: 92618910880230005}
+  shotCost: 2
+  weapon: {fileID: 11400000, guid: 4d1b915d95746a040bac284dbb2808f3, type: 2}
+  ammo: {fileID: 0}
+  turnCost: 1
+  stanceCost: 1
   facing: {fileID: 5871667279447151451}
   hiddenWhileUnseen:
   - {fileID: 7252791061633050214}
