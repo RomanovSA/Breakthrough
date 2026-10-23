@@ -1,0 +1,33 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 2c2ce42e7ba2c6147a0a5636f68dd236, type: 3}
+  m_Name: Weapon_Benelli_M4
+  m_EditorClassIdentifier: Assembly-CSharp::WeaponData
+  displayName: Benelli M4
+  spreadDegrees: 3.9
+  damageMultiplier: 1
+  bulletSpeed: 35
+  defaultAmmo: {fileID: 11400000, guid: 6227d8d0320494743a66ee3bfe9147ea, type: 2}
+  modelPrefab: {fileID: 1236257789494122, guid: 8b0b86b42def11849a8eba21f4a6a684, type: 3}
+  modelMaterial: {fileID: 2100000, guid: 3f414539c8e21bb46be668fa08bec945, type: 2}
+  modelScale: 0.5
+  modelOffset: {x: 0, y: 0, z: -0.05}
+  muzzlePoint: {x: 0, y: -0.009, z: -0.478}
+  rightGrip: {x: 0, y: -0.085, z: 0.175}
+  leftGrip: {x: 0, y: -0.05, z: -0.09}
+  fireModes:
+  - displayName: "\u0417\u0430\u043B\u043F"
+    shots: 1
+    apCost: 2
+    spreadMultiplier: 1
+    shotInterval: 0.1
+    pellets: 8

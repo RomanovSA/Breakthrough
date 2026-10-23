@@ -67,6 +67,9 @@ public class SelectedUnitPanel : MonoBehaviour
         if (valueText != null)
             valueText.text = shownHealth + " / " + shownMaxHealth;
         if (actionPointsText != null)
-            actionPointsText.text = "Очки действия: " + shownPoints + "/" + shownMaxPoints;
+            // the speed goes on the same line, in a smaller print so that it fits the box
+            actionPointsText.text = shownUnit != null
+                ? "<size=75%>Очки действия: " + shownPoints + "/" + shownMaxPoints + " · скорость " + shownUnit.Speed + "</size>"
+                : "Очки действия: " + shownPoints + "/" + shownMaxPoints;
     }
 }

@@ -6,16 +6,18 @@ using UnityEditor;
 
 /// <summary>
 /// Spawns units on the tiles of the field every time the field is (re)built.
-/// What is spawned is described by a list of groups: a unit prefab and how many of it.
-/// The prefab decides the faction (for example one group of player units and one of enemies).
+/// What is spawned is described by a list of groups: a unit prefab, how many of it and, if wanted, another weapon for them than the one
+/// the prefab carries (Weapon). The prefab decides the faction (for example one group of player units and one of enemies).
 ///
 /// Where they stand:
 ///  - The units of the Edge Faction (the player) spawn together, in one cluster at one of the four edges of the field (chosen at random):
-///    the first tile is within Edge Depth tiles of the edge, the others are the nearest free tiles around it.
-///  - The units of the Squad Faction (the enemies) spawn in squads of Squad Min to Squad Max units (the count of the group is split into
-///    squads of those sizes, for example 9 = 3 + 3 + 3 or 4 + 3 + 2): the members stand close together (within Squad Spread tiles of the
-///    squad's first tile) and the squads stand apart (at least Squad Min Distance tiles). No unit of a squad stands closer than
-///    Enemy Min Distance tiles to any unit of the Edge Faction. Each squad is an EnemyGroup, which the members share their intelligence through.
+///    the first tile is within Edge Depth tiles of the edge, the others are the nearest free tiles around it. All the groups of this faction
+///    together make that one cluster.
+///  - The units of the Squad Faction (the enemies) spawn in squads of Squad Min to Squad Max units (all the groups of this faction together
+///    are split into squads of those sizes, for example 9 = 3 + 3 + 3 or 4 + 3 + 2; the units of the different groups are shuffled, so the
+///    weapons are mixed among the squads): the members stand close together (within Squad Spread tiles of the squad's first tile) and
+///    the squads stand apart (at least Squad Min Distance tiles). No unit of a squad stands closer than Enemy Min Distance tiles to any unit
+///    of the Edge Faction. Each squad is an EnemyGroup, which the members share their intelligence through.
 ///  - Units of any other faction stand each on its own random tile.
 /// The player's group is placed first, whatever its place in the list, because the enemies keep away from it.
 /// If the field has no room for the wanted distances, the units are put as far apart as the field allows (a warning is written).
@@ -32,6 +34,15 @@ public class UnitSpawner : MonoBehaviour
         public Unit prefab;
 
         [Min(0)] public int count = 1;
+
+        [Tooltip("Another weapon for these units than the one on the prefab (empty = the prefab's own).")]
+        public WeaponData weapon;
+    }
+
+    private struct Slot
+    {
+        public Unit prefab;
+        public WeaponData weapon;
     }
 
     [SerializeField] private GridManager grid;
@@ -129,118 +140,124 @@ public class UnitSpawner : MonoBehaviour
         foreach (Tile t in tiles)
             byCoords[t.Coords] = t;
 
-        HashSet<Vector2Int> used = new HashSet<Vector2Int>();
-        List<Vector2Int> squadAnchors = new List<Vector2Int>();
-        List<Vector2Int> edgeUnits = new List<Vector2Int>();       // where the units of the Edge Faction stand: the enemies keep away from them
-        int nextTile = 0;
-
-        // the player's group first
-        List<SpawnGroup> ordered = new List<SpawnGroup>();
-        foreach (SpawnGroup group in groups)
-        {
-            if (group != null && group.prefab != null && group.prefab.Faction == edgeFaction)
-                ordered.Add(group);
-        }
-        foreach (SpawnGroup group in groups)
-        {
-            if (group != null && group.prefab != null && group.prefab.Faction != edgeFaction)
-                ordered.Add(group);
-        }
-
+        // every unit to be spawned is a slot: a prefab and a weapon; the slots are sorted by how they are placed
+        List<Slot> edgeSlots = new List<Slot>();
+        List<Slot> squadSlots = new List<Slot>();
+        List<Slot> otherSlots = new List<Slot>();
         foreach (SpawnGroup group in groups)
         {
             if (group == null || group.prefab == null)
+            {
                 Debug.LogWarning("UnitSpawner: a spawn group has no prefab.", this);
-        }
-
-        foreach (SpawnGroup group in ordered)
-        {
-            int serial = 0;
-
-            if (group.prefab.Faction == edgeFaction)
-            {
-                // one cluster at one edge
-                List<Tile> places = ChooseEdgePlaces(group.count, tiles, byCoords, used);
-                foreach (Tile place in places)
-                {
-                    Unit unit = SpawnUnit(group.prefab);
-                    unit.name = unit.Faction + "Unit_" + (++serial);
-                    if (!unit.PlaceOn(place))
-                    {
-                        Debug.LogWarning("UnitSpawner: the tile was already taken, the unit was not spawned.", this);
-                        DestroyImmediate(unit.gameObject);
-                        continue;
-                    }
-
-                    used.Add(place.Coords);
-                    edgeUnits.Add(place.Coords);
-                    result.Add(unit);
-                }
-                continue;
-            }
-
-            if (group.prefab.Faction == squadFaction)
-            {
-                // squads, far from the player's units
-                foreach (int size in SquadSizes(group.count, squadMin, Mathf.Max(squadMin, squadMax)))
-                {
-                    List<Tile> places = ChooseSquadPlaces(size, tiles, byCoords, used, squadAnchors, edgeUnits);
-                    List<Unit> members = new List<Unit>();
-                    foreach (Tile place in places)
-                    {
-                        Unit unit = SpawnUnit(group.prefab);
-                        unit.name = unit.Faction + "Unit_" + (++serial);
-                        if (!unit.PlaceOn(place))
-                        {
-                            Debug.LogWarning("UnitSpawner: the tile was already taken, the unit was not spawned.", this);
-                            DestroyImmediate(unit.gameObject);
-                            continue;
-                        }
-
-                        used.Add(place.Coords);
-                        result.Add(unit);
-                        members.Add(unit);
-                    }
-
-                    if (members.Count > 0)
-                        new EnemyGroup(members);
-                    if (places.Count < size)
-                        Debug.LogWarning("UnitSpawner: there was room for only " + places.Count + " of " + size + " units of a squad.", this);
-                }
                 continue;
             }
 
             for (int i = 0; i < group.count; i++)
             {
-                while (nextTile < tiles.Length && used.Contains(tiles[nextTile].Coords))
-                    nextTile++;
-                if (nextTile >= tiles.Length)
-                {
-                    Debug.LogWarning("UnitSpawner: there are more units than tiles, the rest was not spawned.", this);
-                    spawned = true;
-                    UnitsSpawned?.Invoke();
-                    return result;
-                }
+                Slot slot = new Slot { prefab = group.prefab, weapon = group.weapon };
+                if (group.prefab.Faction == edgeFaction)
+                    edgeSlots.Add(slot);
+                else if (group.prefab.Faction == squadFaction)
+                    squadSlots.Add(slot);
+                else
+                    otherSlots.Add(slot);
+            }
+        }
 
-                Unit unit = SpawnUnit(group.prefab);
-                unit.name = unit.Faction + "Unit_" + (++serial);
-                Tile tile = tiles[nextTile++];
-                if (!unit.PlaceOn(tile))
-                {
-                    // cannot happen with the shuffled list, but never leave two units on one tile
-                    Debug.LogWarning("UnitSpawner: the tile was already taken, the unit was not spawned.", this);
-                    DestroyImmediate(unit.gameObject);
+        HashSet<Vector2Int> used = new HashSet<Vector2Int>();
+        List<Vector2Int> squadAnchors = new List<Vector2Int>();
+        List<Vector2Int> edgeUnits = new List<Vector2Int>();       // where the units of the Edge Faction stand: the enemies keep away from them
+        Dictionary<Faction, int> serials = new Dictionary<Faction, int>();
+
+        // the player's units first: one cluster at one edge
+        if (edgeSlots.Count > 0)
+        {
+            List<Tile> places = ChooseEdgePlaces(edgeSlots.Count, tiles, byCoords, used);
+            for (int i = 0; i < places.Count && i < edgeSlots.Count; i++)
+            {
+                Unit unit = SpawnSlot(edgeSlots[i], places[i], used, serials);
+                if (unit == null)
                     continue;
-                }
-
-                used.Add(tile.Coords);
+                edgeUnits.Add(places[i].Coords);
                 result.Add(unit);
             }
+        }
+
+        // the enemy: the units of all the groups are shuffled (so that the weapons are mixed), then split into squads
+        if (squadSlots.Count > 0)
+        {
+            for (int i = squadSlots.Count - 1; i > 0; i--)
+            {
+                int j = Random.Range(0, i + 1);
+                Slot tmp = squadSlots[i];
+                squadSlots[i] = squadSlots[j];
+                squadSlots[j] = tmp;
+            }
+
+            int next = 0;
+            foreach (int size in SquadSizes(squadSlots.Count, squadMin, Mathf.Max(squadMin, squadMax)))
+            {
+                List<Tile> places = ChooseSquadPlaces(size, tiles, byCoords, used, squadAnchors, edgeUnits);
+                List<Unit> members = new List<Unit>();
+                for (int i = 0; i < places.Count && next < squadSlots.Count; i++)
+                {
+                    Unit unit = SpawnSlot(squadSlots[next++], places[i], used, serials);
+                    if (unit == null)
+                        continue;
+                    result.Add(unit);
+                    members.Add(unit);
+                }
+
+                if (members.Count > 0)
+                    new EnemyGroup(members);
+                if (places.Count < size)
+                    Debug.LogWarning("UnitSpawner: there was room for only " + places.Count + " of " + size + " units of a squad.", this);
+            }
+        }
+
+        // anybody else: each on its own random tile
+        int nextTile = 0;
+        foreach (Slot slot in otherSlots)
+        {
+            while (nextTile < tiles.Length && used.Contains(tiles[nextTile].Coords))
+                nextTile++;
+            if (nextTile >= tiles.Length)
+            {
+                Debug.LogWarning("UnitSpawner: there are more units than tiles, the rest was not spawned.", this);
+                break;
+            }
+
+            Unit unit = SpawnSlot(slot, tiles[nextTile++], used, serials);
+            if (unit != null)
+                result.Add(unit);
         }
 
         spawned = true;
         UnitsSpawned?.Invoke();
         return result;
+    }
+
+    // One unit: made from its prefab, given its weapon (if the group names one), named and put on the tile. Null if the tile was taken.
+    private Unit SpawnSlot(Slot slot, Tile place, HashSet<Vector2Int> used, Dictionary<Faction, int> serials)
+    {
+        Unit unit = SpawnUnit(slot.prefab);
+        int serial;
+        serials.TryGetValue(unit.Faction, out serial);
+        serials[unit.Faction] = ++serial;
+        unit.name = unit.Faction + "Unit_" + serial;
+
+        if (slot.weapon != null)
+            unit.SetWeapon(slot.weapon);
+
+        if (!unit.PlaceOn(place))
+        {
+            Debug.LogWarning("UnitSpawner: the tile was already taken, the unit was not spawned.", this);
+            DestroyImmediate(unit.gameObject);
+            return null;
+        }
+
+        used.Add(place.Coords);
+        return unit;
     }
 
     /// <summary>Splits 'count' units into squads of min to max units (for example 9 into 3 + 3 + 3); never leaves a squad of one.</summary>

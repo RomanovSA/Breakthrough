@@ -45,14 +45,14 @@ public class MovementRangeDisplay : MonoBehaviour
 
         bool moving = unit.IsMoving;
         if (hasState && unit == shownUnit && unit.Coords == shownCoords
-            && unit.ActionPoints == shownPoints && moving == shownMoving
+            && unit.MoveRange(unit.ActionPoints) * 100 + unit.ActionPoints == shownPoints && moving == shownMoving
             && Unit.OccupancyVersion == shownOccupancy)
             return;
 
         hasState = true;
         shownUnit = unit;
         shownCoords = unit.Coords;
-        shownPoints = unit.ActionPoints;
+        shownPoints = unit.MoveRange(unit.ActionPoints) * 100 + unit.ActionPoints;
         shownMoving = moving;
         shownOccupancy = Unit.OccupancyVersion;
 
@@ -79,7 +79,7 @@ public class MovementRangeDisplay : MonoBehaviour
             return;
 
         Tile start = grid.GetTile(unit.Coords);
-        foreach (Tile tile in Pathfinder.GetReachableTiles(grid, start, unit.ActionPoints, unit))
+        foreach (Tile tile in Pathfinder.GetReachableTiles(grid, start, unit.MoveRange(unit.ActionPoints), unit))
         {
             tile.SetReachable(true);
             highlighted.Add(tile);

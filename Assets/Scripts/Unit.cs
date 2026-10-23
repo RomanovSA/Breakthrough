@@ -59,6 +59,8 @@ public class Unit : MonoBehaviour
     [Header("Action points")]
     [SerializeField, Min(0)] private int maxActionPoints = 4;
     [SerializeField, Min(0)] private int actionPoints = 4;
+    [Tooltip("Speed: how many tiles the unit runs for one action point (1 = a point per tile; 2 = two tiles per point). A whole number.")]
+    [SerializeField, Min(1)] private int speed = 1;
 
     [Header("Health")]
     [SerializeField, Min(1)] private int maxHealth = 100;
@@ -132,6 +134,29 @@ public class Unit : MonoBehaviour
 
     /// <summary>Action points left in the current turn.</summary>
     public int ActionPoints => actionPoints;
+
+    /// <summary>Speed: how many tiles the unit runs for one action point.</summary>
+    public int Speed => speed;
+
+    // Walking is paid by the point, and a point buys 'speed' tiles. What was bought and not used yet (a point bought for two tiles when
+    // only one was walked) stays for the rest of the turn.
+    private int movementCredit;
+
+    /// <summary>Tiles that have been paid for already and not yet walked (they are lost when the turn ends).</summary>
+    public int MovementCredit => movementCredit;
+
+    /// <summary>How many tiles of route (as GridManager.PathCost counts them) the unit can walk for this many action points.</summary>
+    public int MoveRange(int points)
+    {
+        return movementCredit + Mathf.Max(0, points) * speed;
+    }
+
+    /// <summary>How many action points walking this many tiles of route takes (what is already paid for is taken off first).</summary>
+    public int PointsForMove(int tileCost)
+    {
+        int unpaid = Mathf.Max(0, tileCost - movementCredit);
+        return (unpaid + speed - 1) / speed;                 // rounded up: a point that is started is paid whole
+    }
 
     /// <summary>Action points the unit gets back at the start of every turn.</summary>
     public int MaxActionPoints => maxActionPoints;
@@ -214,6 +239,12 @@ public class Unit : MonoBehaviour
 
     /// <summary>How many bullets one shot in the present way of firing sends (3 for a burst of three).</summary>
     public int ShotsPerFire => FireMode != null ? Mathf.Max(1, FireMode.shots) : 1;
+
+    /// <summary>How many bullets leave the weapon together in each shot (8 for a shotgun's shot of pellets).</summary>
+    public int PelletsPerShot => FireMode != null ? Mathf.Max(1, FireMode.pellets) : 1;
+
+    /// <summary>All the bullets one use of the present way of firing sends: the shots of a burst times the pellets of each.</summary>
+    public int BulletsPerFire => ShotsPerFire * PelletsPerShot;
 
     /// <summary>Seconds between the bullets of a burst.</summary>
     public float ShotInterval => FireMode != null ? FireMode.shotInterval : 0.1f;
@@ -414,6 +445,166 @@ public class Unit : MonoBehaviour
     {
         actionPoints = maxActionPoints;
         health = maxHealth;
+
+        // the inventory: every unit has one (an UnitInventory on the prefab holds its equipment; without one an empty inventory is made)
+        inventory = GetComponent<UnitInventory>();
+        if (inventory == null)
+            inventory = gameObject.AddComponent<UnitInventory>();
+        inventory.Initialize(this);
+
+        if (weapon != null && weapon.ModelPrefab != null)
+            ApplyWeaponVisual();
+    }
+
+    private UnitInventory inventory;
+
+    /// <summary>What the unit carries: six slots (primary and secondary weapon, armor, vest, extra place, backpack).</summary>
+    public UnitInventory Inventory
+    {
+        get
+        {
+            if (inventory == null)
+            {
+                inventory = GetComponent<UnitInventory>();
+                if (inventory == null)
+                    inventory = gameObject.AddComponent<UnitInventory>();
+                inventory.Initialize(this);
+            }
+            return inventory;
+        }
+    }
+
+    /// <summary>
+    /// Gives the unit a weapon and takes it into the hands: it goes into the first weapon slot of the inventory that it fits (the primary
+    /// one if it fits, taking the place of what was there), and becomes the weapon in the hands.
+    /// </summary>
+    public void SetWeapon(WeaponData newWeapon)
+    {
+        if (newWeapon == null)
+        {
+            ApplyWeapon(null);
+            return;
+        }
+
+        foreach (InventorySlot slot in new[] { InventorySlot.Primary, InventorySlot.Secondary, InventorySlot.Extra })
+        {
+            if (newWeapon.FitsSlot(slot) && Inventory.Equip(slot, newWeapon))
+            {
+                Inventory.SelectWeapon(slot);
+                return;
+            }
+        }
+
+        Debug.LogWarning("Unit: " + newWeapon.name + " fits none of the weapon slots of " + name + ", it is held without being in the inventory.", this);
+        ApplyWeapon(newWeapon);
+    }
+
+    /// <summary>
+    /// Puts the weapon into the hands: its numbers, its ways of firing (the first is selected) and, if it has a model, what the soldier holds.
+    /// The inventory does this when the weapon in the hands changes; to give a unit a weapon use SetWeapon or the inventory.
+    /// </summary>
+    public void ApplyWeapon(WeaponData newWeapon)
+    {
+        weapon = newWeapon;
+        ammo = null;
+        fireModeIndex = 0;
+        ApplyWeaponVisual();
+    }
+
+    private Transform weaponSocket;
+    private GameObject defaultWeaponModel;
+    private Transform defaultMuzzle;
+    private Vector3 defaultRightGrip, defaultLeftGrip;
+    private bool weaponVisualKnown;
+    private GameObject heldModel;
+
+    // What the soldier holds. The rifle that every unit comes with is hidden if the weapon has a model of its own, and that model is
+    // put on the weapon socket instead, with a muzzle at the end of its barrel and the targets of the hands at its grips.
+    private void ApplyWeaponVisual()
+    {
+        if (weaponSocket == null)
+            weaponSocket = FindDeep(transform, "WeaponSocket");
+        if (weaponSocket == null)
+            return;
+
+        Transform rightTarget = weaponSocket.Find("RightHandTarget");
+        Transform leftTarget = weaponSocket.Find("LeftHandTarget");
+        if (!weaponVisualKnown)
+        {
+            weaponVisualKnown = true;
+            defaultMuzzle = muzzle;
+            Transform rifle = weaponSocket.Find("AK74");
+            defaultWeaponModel = rifle != null ? rifle.gameObject : null;
+            defaultRightGrip = rightTarget != null ? rightTarget.localPosition : Vector3.zero;
+            defaultLeftGrip = leftTarget != null ? leftTarget.localPosition : Vector3.zero;
+        }
+
+        if (heldModel != null)
+        {
+            heldModel.SetActive(false);                 // Destroy only works at the end of the frame: the old model must not be seen until then
+            if (Application.isPlaying) Destroy(heldModel); else DestroyImmediate(heldModel);
+            heldModel = null;
+        }
+
+        if (weapon != null && weapon.ModelPrefab != null)
+        {
+            if (defaultWeaponModel != null)
+                defaultWeaponModel.SetActive(false);
+
+            GameObject model = Instantiate(weapon.ModelPrefab, weaponSocket);
+            model.name = "Model_" + weapon.DisplayName;
+            model.transform.localPosition = weapon.ModelOffset;
+            model.transform.localRotation = Quaternion.identity;
+            model.transform.localScale = Vector3.one * weapon.ModelScale;
+            foreach (Collider c in model.GetComponentsInChildren<Collider>())
+            {
+                if (Application.isPlaying) Destroy(c); else DestroyImmediate(c);
+            }
+            if (weapon.ModelMaterial != null)
+            {
+                foreach (Renderer r in model.GetComponentsInChildren<Renderer>())
+                {
+                    Material[] mats = new Material[r.sharedMaterials.Length];
+                    for (int i = 0; i < mats.Length; i++)
+                        mats[i] = weapon.ModelMaterial;
+                    r.sharedMaterials = mats;
+                }
+            }
+
+            Transform end = new GameObject("Muzzle").transform;
+            end.SetParent(model.transform, false);
+            end.localPosition = weapon.MuzzlePoint;
+            end.localRotation = Quaternion.LookRotation(Vector3.back, Vector3.up);
+            muzzle = end;
+
+            if (rightTarget != null)
+                rightTarget.localPosition = weapon.ModelOffset + weapon.RightGrip * weapon.ModelScale;
+            if (leftTarget != null)
+                leftTarget.localPosition = weapon.ModelOffset + weapon.LeftGrip * weapon.ModelScale;
+            heldModel = model;
+        }
+        else
+        {
+            if (defaultWeaponModel != null)
+                defaultWeaponModel.SetActive(true);
+            muzzle = defaultMuzzle;
+            if (rightTarget != null)
+                rightTarget.localPosition = defaultRightGrip;
+            if (leftTarget != null)
+                leftTarget.localPosition = defaultLeftGrip;
+        }
+
+        bodyRenderers = null;               // the unit looks different now: the list of what is hidden when it is concealed is made again
+    }
+
+    private static Transform FindDeep(Transform root, string childName)
+    {
+        foreach (Transform t in root.GetComponentsInChildren<Transform>(true))
+        {
+            if (t.name == childName)
+                return t;
+        }
+        return null;
     }
 
     private void OnEnable()
@@ -467,6 +658,9 @@ public class Unit : MonoBehaviour
     {
         if (amount <= 0)
             return;
+
+        // the armor takes some off every hit, but a hit always does something
+        amount = Mathf.Max(1, amount - Inventory.DamageReduction);
 
         SetHealth(health - amount);
     }
@@ -565,6 +759,7 @@ public class Unit : MonoBehaviour
     /// <summary>Gives the unit all of its action points back (start of a new turn).</summary>
     public void RestoreActionPoints()
     {
+        movementCredit = 0;
         actionPoints = maxActionPoints;
     }
 
@@ -633,7 +828,13 @@ public class Unit : MonoBehaviour
             }
         }
 
-        actionPoints = Mathf.Max(0, actionPoints - cost);
+        // paid by the point: each point buys 'speed' tiles, and what is left of the last one stays for the next hop
+        while (movementCredit < cost && actionPoints > 0)
+        {
+            actionPoints--;
+            movementCredit += speed;
+        }
+        movementCredit = Mathf.Max(0, movementCredit - cost);
 
         // every hop is heard by the other side if it is near (NoiseSystem)
         NoiseSystem.Emit(NoiseKind.Footsteps, this, transform.position);
@@ -660,7 +861,7 @@ public class Unit : MonoBehaviour
 
     /// <summary>
     /// Sends the unit towards the given tile, walking around walls and around other units.
-    /// Every tile of the route costs 1 action point, climbing a ladder (to a roof or back down) costs the ladder cost of
+    /// Every tile of the route costs 1 action point at speed 1 (a unit with speed 2 runs two tiles for a point), climbing a ladder (to a roof or back down) costs the ladder cost of
     /// the field (GridManager, 1 by default). A tile that is farther than the unit has points for
     /// (outside the area it can reach this turn) is refused: the unit does not move at all.
     /// Returns false (and does nothing) if the unit is already moving, has no action points, the tile is farther
@@ -696,8 +897,8 @@ public class Unit : MonoBehaviour
 
         int cost = grid.PathCost(path);
 
-        // Outside the reachable area: not enough points for the whole route, so no move at all.
-        if (cost > actionPoints)
+        // Outside the reachable area: not enough points for the whole route (the speed says how far a point goes), so no move at all.
+        if (PointsForMove(cost) > actionPoints)
             return false;
 
         // Cut corners where possible. The total cost stays the same.

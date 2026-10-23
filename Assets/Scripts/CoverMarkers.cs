@@ -94,7 +94,7 @@ public class CoverMarkers : MonoBehaviour
         }
 
         EnsureAssets();
-        bool changed = !visible || unit != lastUnit || unit.Coords != lastCoords || unit.ActionPoints != lastActionPoints || Unit.OccupancyVersion != lastOccupancy;
+        bool changed = !visible || unit != lastUnit || unit.Coords != lastCoords || unit.MoveRange(unit.ActionPoints) * 100 + unit.ActionPoints != lastActionPoints || Unit.OccupancyVersion != lastOccupancy;
         SetRootsActive(true);
         visible = true;
 
@@ -102,7 +102,7 @@ public class CoverMarkers : MonoBehaviour
         {
             lastUnit = unit;
             lastCoords = unit.Coords;
-            lastActionPoints = unit.ActionPoints;
+            lastActionPoints = unit.MoveRange(unit.ActionPoints) * 100 + unit.ActionPoints;
             lastOccupancy = Unit.OccupancyVersion;
 
             Tile origin = grid.GetTile(Vector2Int.zero);
@@ -150,7 +150,7 @@ public class CoverMarkers : MonoBehaviour
             return;
 
         area.Add(own);
-        area.AddRange(Pathfinder.GetReachableTiles(grid, own, unit.ActionPoints, unit));
+        area.AddRange(Pathfinder.GetReachableTiles(grid, own, unit.MoveRange(unit.ActionPoints), unit));
     }
 
     // One line on the ground for every edge of those tiles that faces a cover.

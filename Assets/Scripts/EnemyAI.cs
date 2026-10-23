@@ -57,6 +57,8 @@ public class EnemyAI : MonoBehaviour
     [SerializeField] private float stepCost = 0.4f;
     [SerializeField] private float exposureWeight = 0.4f;
     [SerializeField] private float stayBonus = 0.5f;
+    [Tooltip("How much it counts that the weapon will really hit from there: how many bullets of all its shots should land, by the distance and the weapon's accuracy (a shotgun likes to be close, a rifle does not mind).")]
+    [SerializeField] private float expectedHitsWeight = 1f;
 
     [Header("Search: what makes a place to wait in good")]
     [SerializeField] private float searchCoverWeight = 1.2f;
@@ -517,7 +519,7 @@ public class EnemyAI : MonoBehaviour
 
         Tile bestSeeing = null, bestNearer = null;
         float seeingScore = float.NegativeInfinity, nearerScore = float.NegativeInfinity;
-        foreach (Tile t in Pathfinder.GetReachableTiles(grid, here, budget, u))
+        foreach (Tile t in Pathfinder.GetReachableTiles(grid, here, u.MoveRange(budget), u))
         {
             if (t == null)
                 continue;
@@ -626,7 +628,7 @@ public class EnemyAI : MonoBehaviour
         List<Tile> candidates = new List<Tile> { here };
         int budget = ap - shotCost;
         if (budget >= 1)
-            candidates.AddRange(Pathfinder.GetReachableTiles(grid, here, budget, u));
+            candidates.AddRange(Pathfinder.GetReachableTiles(grid, here, u.MoveRange(budget), u));
 
         AttackPlan best = null;
         foreach (Tile t in candidates)
@@ -655,7 +657,7 @@ public class EnemyAI : MonoBehaviour
                 needsTurn = Vector3.Angle(looking, toTarget) > u.ViewAngle * 0.5f - 1f;
             }
 
-            int left = ap - cost - (needsTurn ? turnCost : 0);
+            int left = ap - (isHere ? 0 : u.PointsForMove(cost)) - (needsTurn ? turnCost : 0);
             int shots = left / shotCost;
             if (shots < 1)
                 continue;
@@ -678,7 +680,11 @@ public class EnemyAI : MonoBehaviour
             float distanceInTiles = distance / tileSize;
             float rangePenalty = distanceInTiles > 11f ? (distanceInTiles - 11f) * 0.3f : distanceInTiles < 2.5f ? (2.5f - distanceInTiles) : 0f;
 
-            float score = cover * coverWeight + shots * shotWeight - cost * stepCost - exposure * exposureWeight - rangePenalty
+            // how many of the bullets should land from there: the weapon's own ring at that distance
+            float ringRadius = Mathf.Max(0.14f, distance * Mathf.Tan(Mathf.Deg2Rad * u.AimSpread));
+            float expectedHits = shots * u.BulletsPerFire * EstimateHitChance(ringRadius);
+
+            float score = cover * coverWeight + shots * shotWeight + expectedHits * expectedHitsWeight - cost * stepCost - exposure * exposureWeight - rangePenalty
                           - (lean.sqrMagnitude > 1e-6f ? 0.3f : 0f) + (isHere ? stayBonus : 0f) + UnityEngine.Random.value * 0.2f;
 
             if (best == null || score > best.score)
@@ -688,10 +694,29 @@ public class EnemyAI : MonoBehaviour
         return best;
     }
 
+    // How likely a bullet is to hit a soldier standing in the open facing the shooter, for a ring of this radius (metres): the curve was measured
+    // with HitChanceMeter at 15 tiles (the chance shown next to the ring in the shot view). Between the points it is a straight line.
+    private static readonly float[] ringRadii = { 0.10f, 0.14f, 0.17f, 0.20f, 0.23f, 0.26f, 0.30f, 0.35f, 0.40f, 0.50f, 0.65f, 0.80f, 1.00f, 1.50f };
+    private static readonly float[] ringChances = { 1.00f, 0.96f, 0.87f, 0.81f, 0.74f, 0.66f, 0.56f, 0.47f, 0.41f, 0.30f, 0.19f, 0.13f, 0.08f, 0.04f };
+
+    private static float EstimateHitChance(float radius)
+    {
+        if (radius <= ringRadii[0])
+            return ringChances[0];
+        for (int i = 1; i < ringRadii.Length; i++)
+        {
+            if (radius <= ringRadii[i])
+            {
+                float k = (radius - ringRadii[i - 1]) / (ringRadii[i] - ringRadii[i - 1]);
+                return Mathf.Lerp(ringChances[i - 1], ringChances[i], k);
+            }
+        }
+        return ringChances[ringChances.Length - 1] * ringRadii[ringRadii.Length - 1] / radius;       // beyond the table: it falls off with the ring's area
+    }
+
     // A weapon with more than one way of firing: the unit picks the one that should do the most damage this turn against this target. For each
-    // mode it works out the chance of a bullet hitting (a soldier covers roughly 0.18 square metres of the ring, whose size comes from the
-    // distance and the mode's spread) and how many times it could fire the mode with the points it has; a burst wins up close, where the
-    // bullets mostly land, and a single shot at a distance, where a burst only wastes bullets and points.
+    // mode it works out the chance of a bullet hitting (the ring's size comes from the distance and the mode's spread; see EstimateHitChance)
+    // and how many times it could fire the mode with the points it has.
     private void ChooseFireMode(Unit u, Unit target)
     {
         WeaponData w = u.Weapon;
@@ -710,8 +735,8 @@ public class EnemyAI : MonoBehaviour
                 continue;
 
             float radius = Mathf.Max(0.14f, distance * Mathf.Tan(Mathf.Deg2Rad * w.SpreadDegrees * m.spreadMultiplier * ammoSpread));
-            float chance = Mathf.Min(0.9f, 0.18f / (Mathf.PI * radius * radius));
-            float value = (ap / m.apCost) * m.shots * chance;           // expected hits this turn if it keeps firing this mode
+            float chance = EstimateHitChance(radius);
+            float value = (ap / m.apCost) * m.shots * Mathf.Max(1, m.pellets) * chance;           // expected hits this turn if it keeps firing this mode
 
             if (bestIndex < 0 || value > bestValue + 1e-4f)
             {
@@ -736,7 +761,7 @@ public class EnemyAI : MonoBehaviour
         Tile best = null;
         float bestScore = hereScore;
 
-        foreach (Tile t in Pathfinder.GetReachableTiles(grid, here, u.ActionPoints, u))
+        foreach (Tile t in Pathfinder.GetReachableTiles(grid, here, u.MoveRange(u.ActionPoints), u))
         {
             if (t == null)
                 continue;
@@ -811,15 +836,18 @@ public class EnemyAI : MonoBehaviour
         int healthBefore = target.Health;
         FireModeData mode = u.FireMode;
         int bullets = u.ShotsPerFire;
-        Note(Tag(u) + " fires at " + target.name + " from " + u.Coords + (bullets > 1 ? " (" + mode.displayName + " x" + bullets + ")" : "") + " (points left " + u.ActionPoints + ")");
+        Note(Tag(u) + " fires at " + target.name + " from " + u.Coords + (u.BulletsPerFire > 1 ? " (" + mode.displayName + " x" + u.BulletsPerFire + ")" : "") + " (points left " + u.ActionPoints + ")");
         for (int i = 0; i < bullets && u != null && u.IsAlive && target != null && target.IsAlive; i++)
         {
             if (animator != null)
                 animator.PlayShoot();
 
-            Vector3 muzzle = u.MuzzlePosition;
-            Vector3 aim = RandomAimPoint(muzzle, chest, SpreadRing.SpreadRadius(u, target));
-            Bullet.Fire(u, target, muzzle, aim, u.WeaponDamage, u.BulletSpeed);
+            for (int pellet = 0; pellet < u.PelletsPerShot; pellet++)
+            {
+                Vector3 muzzle = u.MuzzlePosition;
+                Vector3 aim = RandomAimPoint(muzzle, chest, SpreadRing.SpreadRadius(u, target));
+                Bullet.Fire(u, target, muzzle, aim, u.WeaponDamage, u.BulletSpeed, pellet == 0);
+            }
             if (i < bullets - 1)
                 yield return u.ShotInterval;
         }
@@ -1009,7 +1037,7 @@ public class EnemyAI : MonoBehaviour
         Tile reach = null;
         for (int i = 1; i < path.Count; i++)
         {
-            if (grid.PathCost(path.GetRange(0, i + 1)) > budget)
+            if (grid.PathCost(path.GetRange(0, i + 1)) > u.MoveRange(budget))
                 break;
             reach = path[i];
         }

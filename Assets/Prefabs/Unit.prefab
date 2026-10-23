@@ -302,6 +302,7 @@ GameObject:
   m_Component:
   - component: {fileID: 708242055151704624}
   - component: {fileID: 7023627610204029782}
+  - component: {fileID: 227416088894549953}
   m_Layer: 0
   m_Name: Unit
   m_TagString: Untagged
@@ -362,8 +363,31 @@ MonoBehaviour:
   - {fileID: 8028746887851220967}
   maxActionPoints: 4
   actionPoints: 4
+  speed: 1
   maxHealth: 100
   health: 100
+--- !u!114 &227416088894549953
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1748426477682426990}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: d7fcd235579853d42a1c2f222af4b709, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::UnitInventory
+  primary: {fileID: 11400000, guid: 4d1b915d95746a040bac284dbb2808f3, type: 2}
+  secondary: {fileID: 0}
+  armor: {fileID: 0}
+  vest: {fileID: 0}
+  extra: {fileID: 0}
+  backpack: {fileID: 0}
+  vestContents: []
+  backpackContents: []
+  activeWeaponSlot: 0
+  switchCost: 1
 --- !u!1 &4698510230675920199
 GameObject:
   m_ObjectHideFlags: 0

@@ -58,7 +58,7 @@ public class Bullet : MonoBehaviour
     /// <summary>
     /// Fires a bullet from the muzzle to the aim point. The speed is in world units per second (a tile is 1).
     /// </summary>
-    public static Bullet Fire(Unit shootingUnit, Unit targetUnit, Vector3 muzzle, Vector3 aimPoint, int bulletDamage, float speed = 40f)
+    public static Bullet Fire(Unit shootingUnit, Unit targetUnit, Vector3 muzzle, Vector3 aimPoint, int bulletDamage, float speed = 40f, bool makeNoise = true)
     {
         Vector3 direction = aimPoint - muzzle;
         if (direction.sqrMagnitude < 1e-6f)
@@ -98,7 +98,8 @@ public class Bullet : MonoBehaviour
         flying.Add(bullet);
 
         // the shot is heard by the other side if it is near enough (NoiseSystem)
-        NoiseSystem.Emit(NoiseKind.Shot, shootingUnit, muzzle);
+        if (makeNoise)                                  // the pellets of one shot are one noise, not eight
+            NoiseSystem.Emit(NoiseKind.Shot, shootingUnit, muzzle);
         return bullet;
     }
 

@@ -13,18 +13,27 @@ MonoBehaviour:
   m_Name: Weapon_AK74
   m_EditorClassIdentifier: Assembly-CSharp::WeaponData
   displayName: "\u0410\u041A-74"
-  spreadDegrees: 3
+  spreadDegrees: 0.78
   damageMultiplier: 1
   bulletSpeed: 40
   defaultAmmo: {fileID: 11400000, guid: 6aba0380b625a9f4d941354e226a8eff, type: 2}
+  modelPrefab: {fileID: 0}
+  modelMaterial: {fileID: 0}
+  modelScale: 0.5
+  modelOffset: {x: 0, y: 0, z: 0}
+  muzzlePoint: {x: 0, y: 0, z: 0}
+  rightGrip: {x: 0, y: 0, z: 0}
+  leftGrip: {x: 0, y: 0, z: 0}
   fireModes:
   - displayName: "\u041E\u0434\u0438\u043D\u043E\u0447\u043D\u044B\u0439"
     shots: 1
     apCost: 2
     spreadMultiplier: 1
     shotInterval: 0.1
+    pellets: 1
   - displayName: "\u041E\u0447\u0435\u0440\u0435\u0434\u044C"
     shots: 3
-    apCost: 3
-    spreadMultiplier: 1.4
+    apCost: 2
+    spreadMultiplier: 1.39
     shotInterval: 0.09
+    pellets: 1

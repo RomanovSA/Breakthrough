@@ -65,7 +65,7 @@ public class FireModeButton : MonoBehaviour
         if (visible && label != null && shooter.FireMode != null)
         {
             FireModeData mode = shooter.FireMode;
-            string text = prefix + mode.displayName + (mode.shots > 1 ? " x" + mode.shots : "");
+            string text = prefix + mode.displayName + (mode.shots * mode.pellets > 1 ? " x" + mode.shots * mode.pellets : "");
             if (text != shownText)
             {
                 shownText = text;

@@ -250,8 +250,12 @@ public class ShotCamera : MonoBehaviour
         if (animator != null)
             animator.PlayShoot();
 
-        LastAimPoint = ring.RandomPointInRing();
-        LastBullet = Bullet.Fire(shooter, target, shooter.MuzzlePosition, LastAimPoint, shooter.WeaponDamage, shooter.BulletSpeed);
+        // the pellets of a shot (one for a rifle, eight for a shotgun) leave together, each to its own random point of the ring
+        for (int pellet = 0; pellet < shooter.PelletsPerShot; pellet++)
+        {
+            LastAimPoint = ring.RandomPointInRing();
+            LastBullet = Bullet.Fire(shooter, target, shooter.MuzzlePosition, LastAimPoint, shooter.WeaponDamage, shooter.BulletSpeed, pellet == 0);
+        }
         burstLeft--;
         burstTimer = shooter.ShotInterval;
     }
@@ -719,7 +723,7 @@ public class ShotCamera : MonoBehaviour
 
         if (ring != null)
         {
-            ring.SetShots(shooter != null ? shooter.ShotsPerFire : 1);
+            ring.SetShots(shooter != null ? shooter.BulletsPerFire : 1);
             ring.Tick(visibility, holdTime, cam);
         }
         if (highlight != null)
